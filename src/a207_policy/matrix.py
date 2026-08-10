@@ -237,6 +237,12 @@ WRITE_TOOL_POLICY: dict[str, dict[str, object]] = {
         "requires_confirmation": False,
         "note": "关闭工单需留判定链路",
     },
+    "get_adherence_score": {
+        "mcp": "a207-followup-mcp",
+        "allowed": frozenset({"doctor_assistant", "nutritionist", "orchestrator"}),
+        "requires_confirmation": False,
+        "note": "OD-014：依从性评分会落库（写），仅临床/编排角色可写；家长/患儿矩阵 M4=RL 只读（此前漏收口，实测可越权写入）",
+    },
 }
 
 WRITE_TOOL_ALIASES: dict[str, str] = {
