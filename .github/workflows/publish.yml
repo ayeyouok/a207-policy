@@ -1,8 +1,13 @@
 name: Publish to PyPI
 
+#on:
+#  release:
+#    types: [published]
+
 on:
-  release:
-    types: [published]
+  push:
+    branches:
+      - main # 只要往 main 分支提交代码，就自动触发
 
 jobs:
   pypi-publish:
