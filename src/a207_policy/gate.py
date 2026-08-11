@@ -112,6 +112,12 @@ def _check_write_tool(caller_id: str, mcp_id: str, access: str, tool: str) -> di
         return _perm(False, access, "write",
                      f"MX-3 写权收口：{tool} 仅允许 {'/'.join(sorted(allowed))}，"
                      f"当前 caller={caller_id}")
+    # 与 _enforce 保持一致：非豁免写工具额外回查矩阵 R/W（矩阵为唯一事实源）
+    if tool not in _MATRIX_EXEMPT_WRITE_TOOLS:
+        if PERMISSION_MATRIX[owner_mcp][caller_id] != ACCESS_RW:
+            return _perm(False, access, "write",
+                         f"矩阵 {owner_mcp} x {caller_id} = "
+                         f"{PERMISSION_MATRIX[owner_mcp][caller_id]}，无 R/W，拒绝 {tool}")
     return _perm(True, access, "write", f"MX-3 放行：{tool} 由 {caller_id} 执行",
                  tool=tool, requires_confirmation=bool(policy["requires_confirmation"]))
 

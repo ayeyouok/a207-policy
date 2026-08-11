@@ -33,7 +33,6 @@ def resolve_state_path(filename: str, *, base: str | None = None) -> Path:
             root = Path(override)
         else:
             # 未设环境变量：落到系统临时目录，保证可写（避免只读安装目录崩溃）
-            import tempfile
             root = Path(tempfile.gettempdir()) / "a207_state"
     root.mkdir(parents=True, exist_ok=True)
     return root / filename
