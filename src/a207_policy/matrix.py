@@ -11,6 +11,7 @@ v2.3 阶段 0（2026-08-11）：角色从 6 瘦身为 2 + 1 管线身份。
 from __future__ import annotations
 
 from types import MappingProxyType
+from typing import Mapping
 
 # ---------------------------------------------------------------- 角色与 MCP
 
@@ -65,9 +66,24 @@ MCP_ALIASES: dict[str, str] = {
 
 
 def normalize_mcp(name: str) -> str:
-    """把实际发行/目录包名归一为登记表内的键；未知名原样返回（由上层判未登记）。"""
+    """把实际发行/目录包名归一为登记表内的键；大小写不敏感，未知名原样返回（由上层判未登记）。
+
+    分两步匹配：
+    1. 先查 MCP_ALIASES（全小写键，含 a207-* 旧名→CKDNutri-* 映射）
+    2. 再与 MCP_REGISTRY（P1–P5 规范名）做不区分大小写的精确对照
+    两步都未命中则原样返回，让上层 gate 安全地判「未登记」fail-closed。
+    """
     key = (name or "").strip()
-    return MCP_ALIASES.get(key, key)
+    lower = key.lower()
+    # 别名映射（大小写不敏感：输入 a207-CARE-MCP → 别名 a207-care-mcp → 规范名）
+    aliased = MCP_ALIASES.get(lower)
+    if aliased is not None:
+        return aliased
+    # 规范名大小写容错（输入 CKDNutri-Care-mcp → 规范键 CKDNutri-care-mcp）
+    for canonical in MCP_REGISTRY:
+        if lower == canonical.lower():
+            return canonical
+    return key
 
 
 # MX-1：分期类问题不由家庭助手判定，改读 M1 已确诊分期
@@ -97,7 +113,7 @@ ACCESS_RW = "R/W"
 
 _READ_OK: frozenset[str] = frozenset({ACCESS_READ, ACCESS_LIMITED, ACCESS_RW})
 
-PERMISSION_MATRIX: dict[str, dict[str, str]] = {
+_PERMISSION_MATRIX: dict[str, dict[str, str]] = {
     "CKDNutri-clinical-data-mcp": {
         # doctor=R/W：临床助手可读写患儿档案与化验
         # parent=RL：家庭助手仅受限视图（脱敏）
@@ -139,7 +155,9 @@ PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         "risk_warning": ACCESS_READ,
     },
 }
-PERMISSION_MATRIX = MappingProxyType(PERMISSION_MATRIX)
+PERMISSION_MATRIX: Mapping[str, Mapping[str, str]] = MappingProxyType({
+    k: MappingProxyType(v) for k, v in _PERMISSION_MATRIX.items()
+})
 
 # M12 按角色切语料 profile（v2.3 阶段 0：删 nutritionist/child_companion）
 KNOWLEDGE_PROFILE: dict[str, str] = {
@@ -150,7 +168,7 @@ KNOWLEDGE_PROFILE: dict[str, str] = {
 
 # ---------------------------------------------------------------- MX-3 写权（v2.3 阶段 0：删 M11 两条 + 清理退役角色）
 
-WRITE_TOOL_POLICY: dict[str, dict[str, object]] = {
+_WRITE_TOOL_POLICY: dict[str, dict[str, object]] = {
     "upsert_lab_result": {
         "mcp": "CKDNutri-clinical-data-mcp",
         "allowed": frozenset({"doctor_assistant"}),
@@ -200,8 +218,30 @@ WRITE_TOOL_POLICY: dict[str, dict[str, object]] = {
         "requires_confirmation": False,
         "note": "OD-014：依从性评分落库（写），仅临床助手可写；家庭助手 M4=RL 只读",
     },
+    # M4 随访写操作（与 FOLLOWUP_WRITE_ALLOWED 收口一致：仅 doctor）
+    "schedule_followup": {
+        "mcp": "CKDNutri-care-mcp",
+        "allowed": frozenset({"doctor_assistant"}),
+        "requires_confirmation": False,
+        "note": "安排随访计划，仅医生助手可写",
+    },
+    "add_followup_record": {
+        "mcp": "CKDNutri-care-mcp",
+        "allowed": frozenset({"doctor_assistant"}),
+        "requires_confirmation": False,
+        "note": "写入随访记录，仅医生助手可写",
+    },
+    # M10 通用通知（与 NOTIFY_WRITE_ROLES 收口一致：{doctor, risk}）
+    "create_notification": {
+        "mcp": "CKDNutri-care-mcp",
+        "allowed": frozenset({"doctor_assistant", "risk_warning"}),
+        "requires_confirmation": False,
+        "note": "通用通知创建，医生助手和风险管线可发",
+    },
 }
-WRITE_TOOL_POLICY = MappingProxyType(WRITE_TOOL_POLICY)
+WRITE_TOOL_POLICY: Mapping[str, Mapping[str, object]] = MappingProxyType({
+    k: MappingProxyType(v) for k, v in _WRITE_TOOL_POLICY.items()
+})
 
 WRITE_TOOL_ALIASES: dict[str, str] = {
     "写回病历": "push_to_emr", "写入病历": "push_to_emr", "推送病历": "push_to_emr",
