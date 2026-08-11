@@ -203,6 +203,23 @@ def _alias_coverage():
         assert normalize_mcp(infra) == infra, f"{infra} 不应被别名归一"
 
 
+@check("normalize_mcp：剥离 :read/:write 动作后缀 + mcp:// 协议前缀 + 大小写容错 + 类型防御")
+def _normalize_strip_action_suffix():
+    # 动作后缀剥离（根因修复：网关传入 "CKDNutri-nutrition-mcp:read" 应归一为规范名）
+    assert normalize_mcp("CKDNutri-nutrition-mcp:read") == "CKDNutri-nutrition-mcp"
+    assert normalize_mcp("CKDNutri-clinical-data-mcp:write") == "CKDNutri-clinical-data-mcp"
+    # 别名 + 动作后缀
+    assert normalize_mcp("a207-nutrition-calc-mcp:read") == "CKDNutri-nutrition-mcp"
+    # 协议前缀
+    assert normalize_mcp("mcp://CKDNutri-care-mcp:execute") == "CKDNutri-care-mcp"
+    # 类型防御（fail-closed 返回空串）
+    assert normalize_mcp(None) == ""
+    assert normalize_mcp(123) == ""
+    assert normalize_mcp("") == ""
+    # 空串不会误写入 PERMISSION_MATRIX（gate._enforce 会判未登记）
+    assert "" not in PERMISSION_MATRIX
+
+
 @check("_matrix_writers 防归一化：传入废弃旧名也能安全派生（不 KeyError）")
 def _matrix_writers_normalize():
     from a207_policy.matrix import _matrix_writers  # noqa: E402

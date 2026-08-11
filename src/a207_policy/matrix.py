@@ -30,6 +30,9 @@ MCP_REGISTRY: dict[str, str] = {
 }
 
 CLINICAL_CALC_MCP = "CKDNutri-assessment-mcp"
+# 注：calc_growth_zscore / calc_prnt_targets 等营养计算工具实际归属 P2（CKDNutri-nutrition-mcp），
+# 而非 P4（assessment）。CLINICAL_CALC_MCP 仅指向 P4 的 eGFR/分期纯计算；生长发育 Z 评分等
+# 营养域工具的路由应以 NUTRITION_ASSESSMENT_CLINICAL_TOOLS 归属表为准（均归 P2）。
 
 # 包名别名归一（OD-002）：登记表沿用早期命名，实际交付目录/PyPI 包名已变更。
 # 任何曾经出现过的 a207-* 废弃包名都在此全量归一，避免上游（旧版路由/编排/调用方）
@@ -66,24 +69,43 @@ MCP_ALIASES: dict[str, str] = {
 
 
 def normalize_mcp(name: str) -> str:
-    """把实际发行/目录包名归一为登记表内的键；大小写不敏感，未知名原样返回（由上层判未登记）。
+    """把 MCP 名称归一为登记表内的键。
 
-    分两步匹配：
-    1. 先查 MCP_ALIASES（全小写键，含 a207-* 旧名→CKDNutri-* 映射）
-    2. 再与 MCP_REGISTRY（P1–P5 规范名）做不区分大小写的精确对照
-    两步都未命中则原样返回，让上层 gate 安全地判「未登记」fail-closed。
+    处理多级格式变异（大小写/动作后缀/协议前缀），未知名返回空串供上层安全 fail-closed。
+
+    输入示例：
+      - "CKDNutri-nutrition-mcp"           → 规范名
+      - "CKDNutri-nutrition-mcp:read"      → 剥离 :read 后缀后归一
+      - "a207-NUTRITION-CALC-mcp:write"    → 大小写容错 + 动作剥离 + 别名映射
+      - "mcp://CKDNutri-care-mcp:execute"  → 剥离协议前缀
+      - None / 123 / {}                    → 空串（类型防御，fail-closed）
     """
-    key = (name or "").strip()
+    if not isinstance(name, str):
+        return ""
+    key = name.strip()
+    if not key:
+        return ""
+    # 1. 剥离协议前缀与 :action / 路径后缀
+    if key.startswith("mcp://"):
+        key = key[6:]
+    key = key.split(":")[0].split("/")[0].strip()
+    if not key:
+        return ""
+
     lower = key.lower()
-    # 别名映射（大小写不敏感：输入 a207-CARE-MCP → 别名 a207-care-mcp → 规范名）
-    aliased = MCP_ALIASES.get(lower)
-    if aliased is not None:
-        return aliased
-    # 规范名大小写容错（输入 CKDNutri-Care-mcp → 规范键 CKDNutri-care-mcp）
-    for canonical in MCP_REGISTRY:
-        if lower == canonical.lower():
-            return canonical
+    # 2. 优先从别名表找（O(1)，大小写不敏感）
+    if lower in MCP_ALIASES:
+        return MCP_ALIASES[lower]
+    # 3. 从规范名小写索引找（O(1)，大小写容错）
+    if lower in CANONICAL_LOOKUP:
+        return CANONICAL_LOOKUP[lower]
     return key
+
+
+#: O(1) 规范名大小写索引（MCP_REGISTRY → 规范大小写）
+CANONICAL_LOOKUP: Mapping[str, str] = MappingProxyType({
+    canonical.lower(): canonical for canonical in MCP_REGISTRY
+})
 
 
 # MX-1：分期类问题不由家庭助手判定，改读 M1 已确诊分期
@@ -253,6 +275,11 @@ WRITE_TOOL_ALIASES: dict[str, str] = {
     "推送医生": "notify_physician", "通知医生": "notify_physician",
     "通知家长": "notify_parent", "发预警": "trigger_warning_event",
     "触发预警": "trigger_warning_event", "关闭预警": "close_warning",
+    # 新增写工具中文别名（与 WRITE_TOOL_POLICY 同步）
+    "安排随访": "schedule_followup", "预约随访": "schedule_followup",
+    "添加随访": "add_followup_record", "写入随访": "add_followup_record",
+    "创建通知": "create_notification", "发送通知": "create_notification",
+    "计算依从性": "get_adherence_score", "落库依从性": "get_adherence_score",
 }
 
 # 注：写工具判定唯一依据为 WRITE_TOOL_POLICY（detect_write_tool 直接查字典），
