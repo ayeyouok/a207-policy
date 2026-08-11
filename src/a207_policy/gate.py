@@ -82,7 +82,7 @@ def check_permission(caller: str, mcp: str, action: str = "read") -> dict:
     if caller_id not in CALLERS:
         return _perm(False, "-", "read", f"caller={caller_id or '(空)'} 未在权限矩阵登记")
     if mcp_id not in PERMISSION_MATRIX:
-        return _perm(False, "-", "read", f"mcp={mcp_id or '(空)'} 不在 5 个已登记 MCP 内")
+        return _perm(False, "-", "read", f"mcp={mcp or '(空)'} 不在 5 个已登记 MCP 内")
 
     access = PERMISSION_MATRIX[mcp_id][caller_id]
     tool = detect_write_tool(action_id)

@@ -11,7 +11,7 @@ v2.3 阶段 0（2026-08-11）：角色从 6 瘦身为 2 + 1 管线身份。
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Mapping, TypedDict
+from typing import Mapping, TypedDict, cast
 
 # ---------------------------------------------------------------- 角色与 MCP
 
@@ -88,7 +88,7 @@ def normalize_mcp(name: str) -> str:
       - "a207-NUTRITION-CALC-mcp:write"    → 大小写容错 + 动作剥离 + 别名映射
       - "mcp://CKDNutri-care-mcp:execute"  → 剥离协议前缀
       - None / 123 / {}                    → 空串（类型防御，fail-closed）
-      - "a207-gamification-mcp"            → 原样返回（M11 已退役不映射，上层判未登记拒绝）
+      - "a207-gamification-mcp"            → 空串（M11 已退役不映射，严格 fail-closed 拒绝）
     """
     if not isinstance(name, str):
         return ""
@@ -106,7 +106,7 @@ def normalize_mcp(name: str) -> str:
     # 2. 查归一总表（O(1)，大小写不敏感；别名与规范名同表命中）
     if lower in _MCP_LOOKUP:
         return _MCP_LOOKUP[lower]
-    return key
+    return ""  # 未知名返回空串（严格 fail-closed，契约见 docstring）
 
 
 # MX-1：分期类问题不由家庭助手判定，改读 M1 已确诊分期
@@ -270,9 +270,11 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "note": "通用通知创建，医生助手和风险管线可发",
     },
 }
-WRITE_TOOL_POLICY: Mapping[str, Mapping[str, object]] = MappingProxyType({
-    k: MappingProxyType(v) for k, v in _WRITE_TOOL_POLICY.items()
-})
+# 值实际结构遵循 WriteToolPolicy（内层仍为 mappingproxy 只读代理，深冻结不变）
+WRITE_TOOL_POLICY: Mapping[str, WriteToolPolicy] = cast(
+    Mapping[str, WriteToolPolicy],
+    MappingProxyType({k: MappingProxyType(v) for k, v in _WRITE_TOOL_POLICY.items()}),
+)
 
 WRITE_TOOL_ALIASES: dict[str, str] = {
     "写回病历": "push_to_emr", "写入病历": "push_to_emr", "推送病历": "push_to_emr",

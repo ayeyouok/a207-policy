@@ -197,9 +197,9 @@ def _alias_coverage():
         got = normalize_mcp(legacy)
         assert got == canonical, f"{legacy} 归一到 {got!r}，期望 {canonical!r}"
         assert canonical in PERMISSION_MATRIX, f"{canonical} 不在矩阵"
-    # 网关/中间件/已退役 M11 不应被别名归一（保持「未登记」→ fail-closed）
+    # 网关/中间件/已退役 M11 不应被别名归一（返回空串 → 上层 fail-closed 拒绝）
     for infra in ("a207-router-mcp", "a207-gateway-mcp", "a207-gamification-mcp"):
-        assert normalize_mcp(infra) == infra, f"{infra} 不应被别名归一"
+        assert normalize_mcp(infra) == "", f"{infra} 应归一为空串（未登记）"
 
 
 @check("normalize_mcp：剥离 :read/:write 动作后缀 + mcp:// 协议前缀 + 大小写容错 + 类型防御")
