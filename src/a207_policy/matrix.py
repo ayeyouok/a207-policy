@@ -11,7 +11,7 @@ v2.3 阶段 0（2026-08-11）：角色从 6 瘦身为 2 + 1 管线身份。
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, TypedDict
 
 # ---------------------------------------------------------------- 角色与 MCP
 
@@ -50,7 +50,8 @@ MCP_ALIASES: dict[str, str] = {
     "a207-nutrition-assessment-mcp-nfyy": "CKDNutri-nutrition-mcp",
     "a207-nutrition-calc-mcp": "CKDNutri-nutrition-mcp",
     "a207-meal-plan-mcp": "CKDNutri-nutrition-mcp",
-    "a207-gamification-mcp": "CKDNutri-nutrition-mcp",   # M11 打卡并入 M3 upsert_food_diary
+    # 注：a207-gamification-mcp（M11）已整体退役，不再映射到 P2 —— 彻底阻断旧流量
+    # （旧打卡调用应改用 CKDNutri-nutrition-mcp 的 upsert_food_diary；传旧名落回「未登记」fail-closed）
     # --- P3 随访沟通（随访 + 通知合并）---
     "a207-care-mcp": "CKDNutri-care-mcp",
     "a207-followup-mcp": "CKDNutri-care-mcp",
@@ -68,9 +69,11 @@ MCP_ALIASES: dict[str, str] = {
 }
 
 
-#: O(1) 规范名大小写索引（MCP_REGISTRY → 规范大小写），供 normalize_mcp 使用
-CANONICAL_LOOKUP: Mapping[str, str] = MappingProxyType({
-    canonical.lower(): canonical for canonical in MCP_REGISTRY
+#: 归一查找总表（别名 + 规范名小写索引合并，O(1) 单次命中）
+#: 键空间无冲突：MCP_ALIASES 键均为 a207-* 前缀，规范名索引键均为 ckdnutri-* 前缀。
+_MCP_LOOKUP: Mapping[str, str] = MappingProxyType({
+    **{k.lower(): v for k, v in MCP_ALIASES.items()},
+    **{canonical.lower(): canonical for canonical in MCP_REGISTRY},
 })
 
 
@@ -85,6 +88,7 @@ def normalize_mcp(name: str) -> str:
       - "a207-NUTRITION-CALC-mcp:write"    → 大小写容错 + 动作剥离 + 别名映射
       - "mcp://CKDNutri-care-mcp:execute"  → 剥离协议前缀
       - None / 123 / {}                    → 空串（类型防御，fail-closed）
+      - "a207-gamification-mcp"            → 原样返回（M11 已退役不映射，上层判未登记拒绝）
     """
     if not isinstance(name, str):
         return ""
@@ -99,12 +103,9 @@ def normalize_mcp(name: str) -> str:
         return ""
 
     lower = key.lower()
-    # 2. 优先从别名表找（O(1)，大小写不敏感）
-    if lower in MCP_ALIASES:
-        return MCP_ALIASES[lower]
-    # 3. 从规范名小写索引找（O(1)，大小写容错）
-    if lower in CANONICAL_LOOKUP:
-        return CANONICAL_LOOKUP[lower]
+    # 2. 查归一总表（O(1)，大小写不敏感；别名与规范名同表命中）
+    if lower in _MCP_LOOKUP:
+        return _MCP_LOOKUP[lower]
     return key
 
 
@@ -190,7 +191,15 @@ KNOWLEDGE_PROFILE: dict[str, str] = {
 
 # ---------------------------------------------------------------- MX-3 写权（v2.3 阶段 0：删 M11 两条 + 清理退役角色）
 
-_WRITE_TOOL_POLICY: dict[str, dict[str, object]] = {
+class WriteToolPolicy(TypedDict):
+    """MX-3 写工具策略条目（类型化，替代裸 dict[str, object]）。"""
+    mcp: str
+    allowed: frozenset[str]
+    requires_confirmation: bool
+    note: str
+
+
+_WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
     "upsert_lab_result": {
         "mcp": "CKDNutri-clinical-data-mcp",
         "allowed": frozenset({"doctor_assistant"}),
@@ -386,9 +395,11 @@ NOTIFY_READ_ROLES: frozenset[str] = _matrix_readers("CKDNutri-care-mcp")    # {d
 # M11 游戏化 —— v2.3 阶段 0 退役，相关集合全部移除
 
 # v2.3 阶段 0 兼容空值（M11/router 本地代码仍 import 这些符号，M11 退役后清理）
-# 设为空以确保：① import 不报错 ② enforce 逻辑拒绝所有调用（退役行为一致）
-# GAMIFICATION_MCP 现指向 M11 并入后的新家（M3 / P2）；GAMIFICATION_ALLOWED 仍为空集合，
-# 故任何引用它的调用方仍被 fail-closed 拒绝，符号漂移已纠正、无安全回归。
+# GAMIFICATION_ALLOWED 是「白名单」语义：空集 ⇒ 任何调用方都不在名单内 ⇒ fail-closed 拒绝，
+#   与退役行为一致（依赖 GAMIFICATION_MCP/GAMIFICATION_ALLOWED 的旧代码一律被拒）。
+# GAMIFICATION_MCP 现指向 M11 并入后的新家（M3 / P2）。
+# CHILD_FORBIDDEN_MCPS 是「黑名单」语义：空集 ⇒ 无角色被封锁（child_companion 已随角色
+#   退役，CALLERS 中已不存在该角色，无需封锁项），与 HIS_BLOCKED 的空集注释一致。
 GAMIFICATION_MCP = "CKDNutri-nutrition-mcp"
 GAMIFICATION_ALLOWED: frozenset[str] = frozenset()
 CHILD_FORBIDDEN_MCPS: frozenset[str] = frozenset()

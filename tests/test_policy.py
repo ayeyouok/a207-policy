@@ -181,7 +181,6 @@ def _alias_coverage():
         "a207-nutrition-assessment-mcp-nfyy": "CKDNutri-nutrition-mcp",
         "a207-nutrition-calc-mcp": "CKDNutri-nutrition-mcp",
         "a207-meal-plan-mcp": "CKDNutri-nutrition-mcp",
-        "a207-gamification-mcp": "CKDNutri-nutrition-mcp",
         "a207-care-mcp": "CKDNutri-care-mcp",
         "a207-followup-mcp": "CKDNutri-care-mcp",
         "a207-notification-mcp": "CKDNutri-care-mcp",
@@ -198,8 +197,8 @@ def _alias_coverage():
         got = normalize_mcp(legacy)
         assert got == canonical, f"{legacy} 归一到 {got!r}，期望 {canonical!r}"
         assert canonical in PERMISSION_MATRIX, f"{canonical} 不在矩阵"
-    # 网关/中间件不应被别名归一（保持「未登记」）
-    for infra in ("a207-router-mcp", "a207-gateway-mcp"):
+    # 网关/中间件/已退役 M11 不应被别名归一（保持「未登记」→ fail-closed）
+    for infra in ("a207-router-mcp", "a207-gateway-mcp", "a207-gamification-mcp"):
         assert normalize_mcp(infra) == infra, f"{infra} 不应被别名归一"
 
 
