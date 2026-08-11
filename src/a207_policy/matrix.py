@@ -250,6 +250,18 @@ HIS_ALLOWED_FILTER_KEYS: frozenset[str] = frozenset(
     {"age_band", "ckd_stage", "dialysis", "sex", "primary_disease",
      "has_allergies", "min_age_years", "max_age_years"})
 
+# F3（v2.3）：P1 HIS 家长视图专有敏感聚合块，登记到单一事实源，避免与 CLINICIAN_ONLY_FIELDS 双轨漂移。
+# 这些块家长绝不可见：
+#   biochemistry      —— 原始化验面板（内含 scr_umol_L / k_mmol_L 等 CLINICIAN_ONLY_FIELDS 叶子）
+#   food_diary_5d     —— 5 日饮食日记（原始摄入）
+#   dialysis_detail   —— 透析明细
+#   medical_record_no —— 病案号（PII）
+#   bsa_m2            —— 体表面积（临床计算指标，家长视图不展示）
+# 注：z_score_height / stage_confirmed_by 等叶子级敏感键已由 CLINICIAN_ONLY_FIELDS 覆盖，无需在此重复。
+P1_PARENT_HIDDEN_FIELDS: frozenset[str] = frozenset({
+    "biochemistry", "food_diary_5d", "dialysis_detail", "medical_record_no", "bsa_m2",
+})
+
 # --- M2 LIS ---
 LIS_READ_FULL: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
 LIS_READ_LIMITED: frozenset[str] = frozenset({"parent_assistant"})
