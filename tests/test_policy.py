@@ -230,7 +230,7 @@ def _nutrition_write_derived():
         f"营养写白名单={NUTRITION_ASSESSMENT_WRITE_ALLOWED}，期望 {{parent_assistant}}"
 
 
-@check("LIS/FOLLOWUP/NOTIFY 写白名单同样由矩阵派生（OD-011 一致）")
+@check("LIS 写白名单由矩阵派生；FOLLOWUP 强制收口为仅医生（有意识不派生，防 risk 误写随访落盘）；NOTIFY 写白名单由矩阵派生——三个集合并存且均为确定性")
 def _other_writes_derived():
     from a207_policy.matrix import (  # noqa: E402
         FOLLOWUP_WRITE_ALLOWED,
@@ -239,7 +239,8 @@ def _other_writes_derived():
         _matrix_writers,
     )
     assert LIS_WRITE_ALLOWED == _matrix_writers("CKDNutri-clinical-data-mcp")
-    assert FOLLOWUP_WRITE_ALLOWED == _matrix_writers("CKDNutri-care-mcp")
+    # FOLLOWUP_WRITE_ALLOWED 有意识不派生自矩阵（随访落盘仅 doctor，risk 写权走 notify_* 单独通道）
+    assert FOLLOWUP_WRITE_ALLOWED == frozenset({"doctor_assistant"})
     assert NOTIFY_WRITE_ROLES == _matrix_writers("CKDNutri-care-mcp")
 
 

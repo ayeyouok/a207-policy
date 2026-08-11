@@ -211,12 +211,9 @@ WRITE_TOOL_ALIASES: dict[str, str] = {
     "触发预警": "trigger_warning_event", "关闭预警": "close_warning",
 }
 
-WRITE_ACTION_PREFIXES: tuple[str, ...] = (
-    "write", "create", "update", "delete", "insert",
-    "upsert_", "notify_", "push_", "trigger_",
-    "close_", "schedule_", "save_",
-)
-
+# 注：写工具判定唯一依据为 WRITE_TOOL_POLICY（detect_write_tool 直接查字典），
+# 不存在基于前缀的试探性判定。get_adherence_score 虽以 get_ 开头，但已在
+# WRITE_TOOL_POLICY 中登记为写工具（OD-014：评分落库），detect_write_tool 可正确识别。
 CN_WRITE_HINTS: tuple[str, ...] = ("写入", "写回", "新增一条", "保存到", "提交写")
 
 
@@ -230,9 +227,12 @@ def resolve_access(access: str, is_write: bool) -> bool:
 # ---------------------------------------------------------------- OD-011：从矩阵派生本地集合
 
 def _matrix_readers(mcp: str) -> frozenset[str]:
-    """从权限矩阵派生：对该 mcp 有读权限（R/RL/RW）的 caller 集合。"""
+    """从权限矩阵派生：对该 mcp 有读权限（R/RL/RW）的 caller 集合。
+    mcp 未登记时返回空集合（fail-closed），不抛 KeyError。
+    """
     real_mcp = normalize_mcp(mcp)
-    return frozenset(c for c, a in PERMISSION_MATRIX[real_mcp].items() if a in _READ_OK)
+    entry = PERMISSION_MATRIX.get(real_mcp, {})
+    return frozenset(c for c, a in entry.items() if a in _READ_OK)
 
 
 def _matrix_writers(mcp: str) -> frozenset[str]:
@@ -240,9 +240,11 @@ def _matrix_writers(mcp: str) -> frozenset[str]:
 
     OD-011 收口点：各包本地写白名单的唯一事实源就是矩阵，不允许再手写一份更宽的集合。
     内部先 normalize_mcp 防御：若传入未归一化的旧包名（如 a207-care-mcp）也安全落回矩阵键。
+    mcp 未登记时返回空集合（fail-closed），不抛 KeyError。
     """
     real_mcp = normalize_mcp(mcp)
-    return frozenset(c for c, a in PERMISSION_MATRIX[real_mcp].items() if a == ACCESS_RW)
+    entry = PERMISSION_MATRIX.get(real_mcp, {})
+    return frozenset(c for c, a in entry.items() if a == ACCESS_RW)
 
 
 # ================================================================
@@ -278,7 +280,10 @@ LIS_CRITICAL_CHANNEL: frozenset[str] = frozenset({"risk_warning", "doctor_assist
 LIS_WRITE_ALLOWED: frozenset[str] = _matrix_writers("CKDNutri-clinical-data-mcp")   # {doctor}
 
 # --- M4 随访 ---
-FOLLOWUP_WRITE_ALLOWED: frozenset[str] = _matrix_writers("CKDNutri-care-mcp")  # {doctor}
+# 随访写操作（schedule_followup / add_followup_record）仅临床助手可写；
+# risk_warning 的写权走 notify_* 单独通道（WRITE_TOOL_POLICY 钳制），
+# 不派生自矩阵（矩阵 care×risk=R/W 是为 notify_* 放行，并非常规随访写权）。
+FOLLOWUP_WRITE_ALLOWED: frozenset[str] = frozenset({"doctor_assistant"})  # {doctor}
 FOLLOWUP_CLINICIAN: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
 
 # --- M3 营养评估 工具级 ACL ---
