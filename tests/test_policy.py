@@ -168,6 +168,54 @@ def _alias_normalize():
         assert canonical in PERMISSION_MATRIX, f"{canonical} 不在矩阵中"
 
 
+@check("别名防漏：已知全部废弃 a207-* 旧名都正确映射到 P1–P5（防止漏配遗留 mcp 未登记）")
+def _alias_coverage():
+    coverage = {
+        "a207-clinical-data-mcp": "CKDNutri-clinical-data-mcp",
+        "a207-his-mcp": "CKDNutri-clinical-data-mcp",
+        "a207-lis-mcp": "CKDNutri-clinical-data-mcp",
+        "a207-nutrition-mcp": "CKDNutri-nutrition-mcp",
+        "a207-nutrition-assessment-mcp": "CKDNutri-nutrition-mcp",
+        "a207-nutrition-assessment-mcp-nfyy": "CKDNutri-nutrition-mcp",
+        "a207-nutrition-calc-mcp": "CKDNutri-nutrition-mcp",
+        "a207-meal-plan-mcp": "CKDNutri-nutrition-mcp",
+        "a207-gamification-mcp": "CKDNutri-nutrition-mcp",
+        "a207-care-mcp": "CKDNutri-care-mcp",
+        "a207-followup-mcp": "CKDNutri-care-mcp",
+        "a207-notification-mcp": "CKDNutri-care-mcp",
+        "a207-notify-mcp": "CKDNutri-care-mcp",
+        "a207-decision-mcp": "CKDNutri-assessment-mcp",
+        "a207-clinical-calc-mcp": "CKDNutri-assessment-mcp",
+        "a207-ckd-clinical-calc-mcp": "CKDNutri-assessment-mcp",
+        "a207-risk-rules-mcp": "CKDNutri-assessment-mcp",
+        "a207-content-mcp": "CKDNutri-content-mcp",
+        "a207-report-mcp": "CKDNutri-content-mcp",
+        "a207-knowledge-mcp": "CKDNutri-content-mcp",
+    }
+    for legacy, canonical in coverage.items():
+        got = normalize_mcp(legacy)
+        assert got == canonical, f"{legacy} 归一到 {got!r}，期望 {canonical!r}"
+        assert canonical in PERMISSION_MATRIX, f"{canonical} 不在矩阵"
+    # 网关/中间件不应被别名归一（保持「未登记」）
+    for infra in ("a207-router-mcp", "a207-gateway-mcp"):
+        assert normalize_mcp(infra) == infra, f"{infra} 不应被别名归一"
+
+
+@check("_matrix_writers 防归一化：传入废弃旧名也能安全派生（不 KeyError）")
+def _matrix_writers_normalize():
+    from a207_policy.matrix import _matrix_writers  # noqa: E402
+    got = _matrix_writers("a207-followup-mcp")
+    assert got == _matrix_writers("CKDNutri-care-mcp"), "旧名 a207-followup-mcp 未正确归一"
+
+
+@check("GAMIFICATION_MCP 已纠正符号漂移（指向 M11 并入后的 P2）")
+def _gamification_symbol():
+    from a207_policy.matrix import GAMIFICATION_MCP  # noqa: E402
+    assert GAMIFICATION_MCP == "CKDNutri-nutrition-mcp"
+    from a207_policy.matrix import GAMIFICATION_ALLOWED  # noqa: E402
+    assert GAMIFICATION_ALLOWED == frozenset(), "退役包写白名单必须仍为空（fail-closed）"
+
+
 # --------------------------------------------------------- OD-011：写白名单唯一事实源
 
 @check("NUTRITION_ASSESSMENT_WRITE_ALLOWED 必须从矩阵派生（OD-011，禁手写更宽集合）")
