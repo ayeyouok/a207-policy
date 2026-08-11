@@ -68,6 +68,12 @@ MCP_ALIASES: dict[str, str] = {
 }
 
 
+#: O(1) 规范名大小写索引（MCP_REGISTRY → 规范大小写），供 normalize_mcp 使用
+CANONICAL_LOOKUP: Mapping[str, str] = MappingProxyType({
+    canonical.lower(): canonical for canonical in MCP_REGISTRY
+})
+
+
 def normalize_mcp(name: str) -> str:
     """把 MCP 名称归一为登记表内的键。
 
@@ -100,12 +106,6 @@ def normalize_mcp(name: str) -> str:
     if lower in CANONICAL_LOOKUP:
         return CANONICAL_LOOKUP[lower]
     return key
-
-
-#: O(1) 规范名大小写索引（MCP_REGISTRY → 规范大小写）
-CANONICAL_LOOKUP: Mapping[str, str] = MappingProxyType({
-    canonical.lower(): canonical for canonical in MCP_REGISTRY
-})
 
 
 # MX-1：分期类问题不由家庭助手判定，改读 M1 已确诊分期
