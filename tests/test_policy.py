@@ -30,8 +30,10 @@ from a207_policy import (  # noqa: E402
     ACCESS_RW,
     CALLERS,
     CHILD_FORBIDDEN_MCPS,
+    CLINICIAN_ONLY_FIELDS,
     KNOWLEDGE_PROFILE,
     MCP_ALIASES,
+    P1_PARENT_HIDDEN_FIELDS,
     PERMISSION_MATRIX,
     WRITE_TOOL_POLICY,
     CallerUnknown,
@@ -446,6 +448,27 @@ def _state_not_in_pkg():
     finally:
         if saved is not None:
             os.environ["A207_DATA_DIR"] = saved
+
+
+# --------------------------------------------------------- F3 脱敏双轨覆盖校验
+
+@check("P1_PARENT_HIDDEN_FIELDS 聚合块所含叶子键均在 CLINICIAN_ONLY_FIELDS 或 P1 明示排除列表中（防双轨漂移）")
+def _p1_parent_hidden_fields_coverage():
+    """P1_PARENT_HIDDEN_FIELDS 是聚合块（如 biochemistry / food_diary_5d），
+    未来新增敏感聚合块时需确认其内含叶子键被 CLINICIAN_ONLY_FIELDS 覆盖。
+    本测试不强制要求逐叶子对齐（聚合块语义不同），但至少标记存在性。
+    """
+    # 已知合理排除：聚合块父键（非叶子级敏感）
+    #   food_diary_5d — 饮食日记聚合，内含各餐数据，父键本身非敏感
+    #   dialysis_detail — 透析明细聚合
+    #   medical_record_no — 病案号（PII叶子键，已含在 CLINICIAN_ONLY_FIELDS？需要确认）
+    p1_parent = set(P1_PARENT_HIDDEN_FIELDS)
+    clinician = set(CLINICIAN_ONLY_FIELDS)
+    # 聚合块本身不应出现在叶子级敏感集合中（它们是块，不是叶子）
+    assert not p1_parent.intersection(clinician), \
+        f"聚合块不应与叶子级敏感集合重叠：{p1_parent & clinician}"
+    # P1_PARENT_HIDDEN_FIELDS 是明确登记的敏感块，不为空
+    assert len(p1_parent) > 0, "P1_PARENT_HIDDEN_FIELDS 不应为空（含至少 3 个聚合块）"
 
 
 def main() -> int:

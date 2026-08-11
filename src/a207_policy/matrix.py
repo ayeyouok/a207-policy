@@ -10,6 +10,8 @@ v2.3 阶段 0（2026-08-11）：角色从 6 瘦身为 2 + 1 管线身份。
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 # ---------------------------------------------------------------- 角色与 MCP
 
 CALLERS: tuple[str, ...] = (
@@ -137,6 +139,7 @@ PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         "risk_warning": ACCESS_READ,
     },
 }
+PERMISSION_MATRIX = MappingProxyType(PERMISSION_MATRIX)
 
 # M12 按角色切语料 profile（v2.3 阶段 0：删 nutritionist/child_companion）
 KNOWLEDGE_PROFILE: dict[str, str] = {
@@ -198,6 +201,7 @@ WRITE_TOOL_POLICY: dict[str, dict[str, object]] = {
         "note": "OD-014：依从性评分落库（写），仅临床助手可写；家庭助手 M4=RL 只读",
     },
 }
+WRITE_TOOL_POLICY = MappingProxyType(WRITE_TOOL_POLICY)
 
 WRITE_TOOL_ALIASES: dict[str, str] = {
     "写回病历": "push_to_emr", "写入病历": "push_to_emr", "推送病历": "push_to_emr",
@@ -212,9 +216,10 @@ WRITE_TOOL_ALIASES: dict[str, str] = {
 }
 
 # 注：写工具判定唯一依据为 WRITE_TOOL_POLICY（detect_write_tool 直接查字典），
-# 不存在基于前缀的试探性判定。get_adherence_score 虽以 get_ 开头，但已在
+# 不存在基于前缀或中文提示词的试探性判定。get_adherence_score 虽以 get_ 开头，但已在
 # WRITE_TOOL_POLICY 中登记为写工具（OD-014：评分落库），detect_write_tool 可正确识别。
-CN_WRITE_HINTS: tuple[str, ...] = ("写入", "写回", "新增一条", "保存到", "提交写")
+# WRITE_TOOL_ALIASES 中的中文别名（"录入化验"/"记录饮食"/"推送医生"）仅用于
+# detect_write_tool 的辅助匹配，不参与 is_write_action 判定。
 
 
 def resolve_access(access: str, is_write: bool) -> bool:
@@ -305,6 +310,10 @@ NUTRITION_ASSESSMENT_CLINICAL_TOOLS: frozenset[str] = frozenset({
 NUTRITION_ASSESSMENT_CLINICAL_ROLES: frozenset[str] = frozenset({"doctor_assistant"})
 
 # --- M10 通知 ---
+# NOTIFY_WRITE_ROLES 用于通用通知 CRUD（create_notification），涵盖 {doctor, risk}。
+# 注：notify_* 触发器类工具（notify_physician / notify_parent 等）必须通过
+# enforce_write → gate._enforce → WRITE_TOOL_POLICY 进行校验（仅 risk_warning），
+# 不得使用 NOTIFY_WRITE_ROLES 做本地判定——否则 doctor 可绕过通知自动化管线。
 NOTIFY_WRITE_ROLES: frozenset[str] = _matrix_writers("CKDNutri-care-mcp")   # {doctor, risk}
 NOTIFY_READ_ROLES: frozenset[str] = _matrix_readers("CKDNutri-care-mcp")    # {doctor, parent, risk}
 # M11 游戏化 —— v2.3 阶段 0 退役，相关集合全部移除
