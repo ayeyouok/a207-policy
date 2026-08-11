@@ -19,28 +19,20 @@ CALLERS: tuple[str, ...] = (
 )
 
 MCP_REGISTRY: dict[str, str] = {
-    "a207-his-mcp": "M1",
-    "a207-lis-mcp": "M2",
-    "a207-nutrition-assessment-mcp": "M3",
-    "a207-followup-mcp": "M4",
-    "a207-nutrition-calc-mcp": "M5",
-    "a207-ckd-clinical-calc-mcp": "M6",
-    "a207-meal-plan-mcp": "M7",
-    "a207-risk-rules-mcp": "M8",
-    "a207-report-mcp": "M9",
-    "a207-notify-mcp": "M10",
-    # M11 gamification — v2.3 阶段 0 退役，打卡并入 M3
-    "a207-knowledge-mcp": "M12",
-    # M13 router — v2.3 阶段 0 退出 MCP 统计（P0 网关 → HTTP 中间件，原型暂保留 MCP 形态）
+    "CKDNutri-clinical-data-mcp": "P1",
+    "CKDNutri-nutrition-mcp": "P2",
+    "CKDNutri-care-mcp": "P3",
+    "CKDNutri-assessment-mcp": "P4",
+    "CKDNutri-content-mcp": "P5",
 }
 
-CLINICAL_CALC_MCP = "a207-ckd-clinical-calc-mcp"
+CLINICAL_CALC_MCP = "CKDNutri-assessment-mcp"
 
 # 包名别名归一（OD-002）：登记表沿用早期命名，实际交付目录/PyPI 包名已变更。
 MCP_ALIASES: dict[str, str] = {
-    "a207-clinical-calc-mcp": "a207-ckd-clinical-calc-mcp",
-    "a207-notification-mcp": "a207-notify-mcp",
-    "a207-nutrition-assessment-mcp-nfyy": "a207-nutrition-assessment-mcp",
+    "a207-clinical-calc-mcp": "CKDNutri-assessment-mcp",
+    "a207-notification-mcp": "CKDNutri-care-mcp",
+    "a207-nutrition-assessment-mcp-nfyy": "CKDNutri-nutrition-mcp",
 }
 
 
@@ -78,52 +70,52 @@ ACCESS_RW = "R/W"
 _READ_OK: frozenset[str] = frozenset({ACCESS_READ, ACCESS_LIMITED, ACCESS_RW})
 
 PERMISSION_MATRIX: dict[str, dict[str, str]] = {
-    "a207-his-mcp": {
+    "CKDNutri-clinical-data-mcp": {
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
-    "a207-lis-mcp": {
+    "CKDNutri-clinical-data-mcp": {
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
-    "a207-nutrition-assessment-mcp": {
+    "CKDNutri-nutrition-mcp": {
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
-    "a207-followup-mcp": {
+    "CKDNutri-care-mcp": {
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
-    "a207-nutrition-calc-mcp": {
+    "CKDNutri-nutrition-mcp": {
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_READ,
         "risk_warning": ACCESS_NONE,
     },
-    "a207-ckd-clinical-calc-mcp": {
+    "CKDNutri-assessment-mcp": {
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_NONE,
         "risk_warning": ACCESS_NONE,
     },
-    "a207-meal-plan-mcp": {
+    "CKDNutri-nutrition-mcp": {
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_NONE,
         "risk_warning": ACCESS_NONE,
     },
-    "a207-risk-rules-mcp": {
+    "CKDNutri-assessment-mcp": {
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_NONE,
         "risk_warning": ACCESS_READ,
     },
-    "a207-report-mcp": {
+    "CKDNutri-content-mcp": {
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
-    "a207-notify-mcp": {
+    "CKDNutri-care-mcp": {
         # doctor=R/W：临床助手可创建/确认通知
         # parent=READ：家庭助手读通知（含闭环状态查看）
         # risk=R/W：管线身份写通知（notify_* 系列由 WRITE_TOOL_POLICY 钳制为 {risk_warning}）
@@ -132,7 +124,7 @@ PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         "risk_warning": ACCESS_RW,
     },
     # M11 退役（打卡并入 M3 upsert_food_diary）
-    "a207-knowledge-mcp": {
+    "CKDNutri-content-mcp": {
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
@@ -151,50 +143,50 @@ KNOWLEDGE_PROFILE: dict[str, str] = {
 
 WRITE_TOOL_POLICY: dict[str, dict[str, object]] = {
     "upsert_lab_result": {
-        "mcp": "a207-lis-mcp",
+        "mcp": "CKDNutri-clinical-data-mcp",
         "allowed": frozenset({"doctor_assistant"}),
         "requires_confirmation": False,
         "note": "写入后触发 HAIP Workflow → P4 assess_clinical_status 重评",
     },
     "upsert_food_diary": {
-        "mcp": "a207-nutrition-assessment-mcp",
+        "mcp": "CKDNutri-nutrition-mcp",
         "allowed": frozenset({"parent_assistant"}),    # v2.3: 仅家庭助手，删 child_companion
         "requires_confirmation": False,
         "note": "打卡落点，供 sum_diet_intake 与食谱参考依从性",
     },
     # M11 log_meal_checkin / award_badge 退役
     "push_to_emr": {
-        "mcp": "a207-report-mcp",
+        "mcp": "CKDNutri-content-mcp",
         "allowed": frozenset({"doctor_assistant"}),
         "requires_confirmation": True,
         "note": "需调用方另传 physician_confirmed=true，人在回路",
     },
     "notify_physician": {
-        "mcp": "a207-notify-mcp",
+        "mcp": "CKDNutri-care-mcp",
         "allowed": frozenset({"risk_warning"}),         # 仅管线身份
         "requires_confirmation": False,
         "note": "推送前须过 24h 同规则去重",
     },
     "notify_parent": {
-        "mcp": "a207-notify-mcp",
+        "mcp": "CKDNutri-care-mcp",
         "allowed": frozenset({"risk_warning"}),
         "requires_confirmation": False,
         "note": "推送前须过 24h 同规则去重",
     },
     "trigger_warning_event": {
-        "mcp": "a207-notify-mcp",
+        "mcp": "CKDNutri-care-mcp",
         "allowed": frozenset({"risk_warning"}),
         "requires_confirmation": False,
         "note": "等级须由本轮新数据重评得出，禁止沿用历史等级",
     },
     "close_warning": {
-        "mcp": "a207-notify-mcp",
+        "mcp": "CKDNutri-care-mcp",
         "allowed": frozenset({"risk_warning"}),
         "requires_confirmation": False,
         "note": "关闭工单需留判定链路",
     },
     "get_adherence_score": {
-        "mcp": "a207-followup-mcp",
+        "mcp": "CKDNutri-care-mcp",
         "allowed": frozenset({"doctor_assistant"}),     # v2.3: 删 nutritionist / orchestrator
         "requires_confirmation": False,
         "note": "OD-014：依从性评分落库（写），仅临床助手可写；家庭助手 M4=RL 只读",
@@ -262,10 +254,10 @@ HIS_ALLOWED_FILTER_KEYS: frozenset[str] = frozenset(
 LIS_READ_FULL: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
 LIS_READ_LIMITED: frozenset[str] = frozenset({"parent_assistant"})
 LIS_CRITICAL_CHANNEL: frozenset[str] = frozenset({"risk_warning", "doctor_assistant"})
-LIS_WRITE_ALLOWED: frozenset[str] = _matrix_writers("a207-lis-mcp")   # {doctor}
+LIS_WRITE_ALLOWED: frozenset[str] = _matrix_writers("CKDNutri-clinical-data-mcp")   # {doctor}
 
 # --- M4 随访 ---
-FOLLOWUP_WRITE_ALLOWED: frozenset[str] = _matrix_writers("a207-followup-mcp")  # {doctor}
+FOLLOWUP_WRITE_ALLOWED: frozenset[str] = _matrix_writers("CKDNutri-care-mcp")  # {doctor}
 FOLLOWUP_CLINICIAN: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
 
 # --- M3 营养评估 工具级 ACL ---
@@ -285,8 +277,8 @@ NUTRITION_ASSESSMENT_CLINICAL_TOOLS: frozenset[str] = frozenset({
 NUTRITION_ASSESSMENT_CLINICAL_ROLES: frozenset[str] = frozenset({"doctor_assistant"})
 
 # --- M10 通知 ---
-NOTIFY_WRITE_ROLES: frozenset[str] = _matrix_writers("a207-notify-mcp")   # {doctor, risk}
-NOTIFY_READ_ROLES: frozenset[str] = _matrix_readers("a207-notify-mcp")    # {doctor, parent, risk}
+NOTIFY_WRITE_ROLES: frozenset[str] = _matrix_writers("CKDNutri-care-mcp")   # {doctor, risk}
+NOTIFY_READ_ROLES: frozenset[str] = _matrix_readers("CKDNutri-care-mcp")    # {doctor, parent, risk}
 # M11 游戏化 —— v2.3 阶段 0 退役，相关集合全部移除
 
 # v2.3 阶段 0 兼容空值（M11/router 本地代码仍 import 这些符号，M11 退役后清理）
