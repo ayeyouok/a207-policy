@@ -12,9 +12,9 @@ Plan A 单一事实源。13 个 MCP 统一依赖本包：
 
 from __future__ import annotations
 
-from .caller import CallerError, CallerUnknown, as_caller, get_caller, set_caller
+from .caller import as_caller, get_caller, set_caller
+from .exceptions import CallerError, CallerUnknown, PermissionDenied
 from .gate import (
-    PermissionDenied,
     _MATRIX_EXEMPT_WRITE_TOOLS,
     check_permission,
     detect_write_tool,

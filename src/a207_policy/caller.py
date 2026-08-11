@@ -17,28 +17,18 @@ import os
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
+from .exceptions import CallerError, CallerUnknown
+
 ENV_KEY = "A207_CALLER"
-
-# 测试覆盖位（仅测试用）。生产代码严禁调用 set_caller。
-_test_override: Optional[str] = None
-
-
-class CallerError(Exception):
-    """权限/身份相关错误的基类。"""
-
-
-class CallerUnknown(CallerError):
-    """caller 未注入（环境变量缺失或为空）→ fail-closed 拒绝。"""
 
 
 def get_caller() -> str:
     """返回当前进程注入的调用方身份。缺失或空 → 抛 CallerUnknown（fail-closed）。
 
-    生产环境：读取环境变量 A207_CALLER。
-    测试环境：若已调用 set_caller()，返回覆盖值（便于单测，不依赖环境变量）。
+    身份**只**来自环境变量 A207_CALLER（部署配置注入 / 测试用 as_caller 临时写入），
+    单一通道、进程级共享。这样无论 a207_policy 以「全局包」还是「随包内置子模块
+    _policy」的形式存在，调用方读取到的身份都一致——避免多副本模块状态漂移。
     """
-    if _test_override is not None:
-        return _test_override
     value = (os.environ.get(ENV_KEY) or "").strip()
     if not value:
         raise CallerUnknown(
@@ -49,9 +39,11 @@ def get_caller() -> str:
 
 
 def set_caller(value: Optional[str]) -> None:
-    """仅用于测试：覆盖 caller 来源。生产代码不得调用。"""
-    global _test_override
-    _test_override = value
+    """仅用于测试：覆盖 caller 来源（写入 A207_CALLER 环境变量）。生产代码不得调用。"""
+    if value is None:
+        os.environ.pop(ENV_KEY, None)
+    else:
+        os.environ[ENV_KEY] = value
 
 
 @contextmanager
@@ -73,23 +65,20 @@ def as_caller(value: Optional[str]) -> Iterator[None]:
         with as_caller("parent_assistant"):
             core.get_labs(...)      # 自动换回受限视图
 
-    传 None 表示"模拟身份完全缺失"，用来测 fail-closed。注意这里必须同时清掉
-    环境变量——只把 _test_override 置 None 的话，get_caller 会回退去读 env，
-    结果身份还在，fail-closed 测了个寂寞。这个坑很容易踩，所以封在里面。
+    身份写入 A207_CALLER 环境变量（与生产同一通道），因此 set_caller / as_caller
+    对「全局 a207_policy」和「随包内置的 _policy 子模块」都生效——二者读到同一份
+    进程级身份，不会因为模块被复制成多份而出现状态漂移。
+    传 None 表示"模拟身份完全缺失"，用来测 fail-closed（会清掉该环境变量）。
     """
-    global _test_override
-    prev_override = _test_override
-    prev_env = os.environ.get(ENV_KEY)
+    prev = os.environ.get(ENV_KEY)
     if value is None:
-        _test_override = None
         os.environ.pop(ENV_KEY, None)
     else:
-        _test_override = value
+        os.environ[ENV_KEY] = value
     try:
         yield
     finally:
-        _test_override = prev_override
-        if prev_env is None:
+        if prev is None:
             os.environ.pop(ENV_KEY, None)
         else:
-            os.environ[ENV_KEY] = prev_env
+            os.environ[ENV_KEY] = prev

@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import re
 
-from .caller import CallerError, get_caller
+from .caller import get_caller
+from .exceptions import CallerError, PermissionDenied
 from .matrix import (
     ACCESS_RW,
     CALLERS,
@@ -44,17 +45,6 @@ _UNDERSCORE_PREFIXES = tuple(p for p in (
 # 这两个写工具是「工具级白名单治理」的有意例外，红队 B7b 亦据此跳过（见 tests/red_team_probe.py）。
 _MATRIX_EXEMPT_WRITE_TOOLS: frozenset[str] = frozenset(
     {"upsert_food_diary", "record_pew_risk"})
-
-
-class PermissionDenied(CallerError):
-    """确定性拒绝。携带足够信息供工具转成各包既有 forbidden 形态。"""
-
-    def __init__(self, caller: str, mcp: str, action: str, reason: str):
-        self.caller = caller
-        self.mcp = mcp
-        self.action = action
-        self.reason = reason
-        super().__init__(f"DENIED {caller} -> {mcp}:{action} : {reason}")
 
 
 def detect_write_tool(text: str) -> str | None:
