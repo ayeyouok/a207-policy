@@ -280,6 +280,12 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "requires_confirmation": False,
         "note": "闭环状态机 unacked→confirmed→resolved→closed（严格一步流转），仅临床助手",
     },
+    "escalate_notification": {
+        "mcp": "CKDNutri-care-mcp",
+        "allowed": frozenset({"doctor_assistant"}),
+        "requires_confirmation": False,
+        "note": "BUG-46：标记通知升级（escalated 独立布尔，与 workflow_status 正交），仅临床助手；HAIP 自动升级也经此登记落审计",
+    },
 }
 # 值实际结构遵循 WriteToolPolicy（内层仍为 mappingproxy 只读代理，深冻结不变）
 WRITE_TOOL_POLICY: Mapping[str, WriteToolPolicy] = cast(

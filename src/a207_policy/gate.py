@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timezone
 
 from .caller import get_caller
-from .exceptions import CallerError, PermissionDenied
+from .exceptions import PermissionDenied
 from .matrix import (
     ACCESS_RW,
     CALLERS,

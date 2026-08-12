@@ -17,7 +17,7 @@ import os
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
-from .exceptions import CallerError, CallerUnknown
+from .exceptions import CallerUnknown
 
 ENV_KEY = "A207_CALLER"
 
