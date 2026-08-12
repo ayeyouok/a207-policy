@@ -146,10 +146,11 @@ _PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         "risk_warning": ACCESS_READ,
     },
     "CKDNutri-nutrition-mcp": {
-        # doctor=R：临床角色读营养数据 + 跑计算面工具（CLINICAL_ROLES 单独收口）
+        # doctor=R/W：临床角色读营养数据 + 跑计算面工具（CLINICAL_ROLES 单独收口）
+        #   + 按需求 P2 工具表（临床=✔）可写饮食日记 upsert_food_diary（2026-08-12 需求对齐）
         # parent=R/W：写饮食日记(upsert_food_diary) 且需回读日记摘要 —— 与 WRITE_TOOL_POLICY 一致
         # risk=-：风险引擎不读营养域
-        "doctor_assistant": ACCESS_READ,
+        "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_RW,
         "risk_warning": ACCESS_NONE,
     },
@@ -208,9 +209,11 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
     },
     "upsert_food_diary": {
         "mcp": "CKDNutri-nutrition-mcp",
-        "allowed": frozenset({"parent_assistant"}),    # v2.3: 仅家庭助手，删 child_companion
+        # 需求 P2 工具表（2026-08-12 对齐）：临床=✔ 家庭=✔ → parent + doctor 双写；
+        # 豁免矩阵回查（_MATRIX_EXEMPT_WRITE_TOOLS），受 enforce_nutrition_tool 工具级 ACL 管辖。
+        "allowed": frozenset({"parent_assistant", "doctor_assistant"}),
         "requires_confirmation": False,
-        "note": "打卡落点，供 sum_diet_intake 与食谱参考依从性",
+        "note": "打卡落点，供 sum_diet_intake 与食谱参考依从性；医生可代录（临床=✔）",
     },
     # M11 log_meal_checkin / award_badge 退役
     "push_to_emr": {
@@ -268,6 +271,14 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "allowed": frozenset({"doctor_assistant", "risk_warning"}),
         "requires_confirmation": False,
         "note": "通用通知创建，医生助手和风险管线可发",
+    },
+    # 闭环状态机推移：仅临床助手（需求 §5.1「仅 CKD 临床助手」），risk_warning 管线身份不得推移人工闭环。
+    # 2026-08-12 补登记：此前未登记导致回退矩阵 R/W 判定，risk_warning 可越权推移状态机。
+    "update_notification_status": {
+        "mcp": "CKDNutri-care-mcp",
+        "allowed": frozenset({"doctor_assistant"}),
+        "requires_confirmation": False,
+        "note": "闭环状态机 unacked→confirmed→resolved→closed（严格一步流转），仅临床助手",
     },
 }
 # 值实际结构遵循 WriteToolPolicy（内层仍为 mappingproxy 只读代理，深冻结不变）
@@ -371,7 +382,8 @@ FOLLOWUP_CLINICIAN: frozenset[str] = frozenset({"doctor_assistant", "risk_warnin
 
 # --- M3 营养评估 工具级 ACL ---
 # OD-011 收口：写白名单唯一事实源=矩阵，不允许手写更宽集合（与 LIS/FOLLOWUP 一致）。
-# 矩阵 nutrition×parent=R/W ⇒ 这里自然得出 {parent_assistant}。
+# 矩阵 nutrition×parent=R/W、×doctor=R/W（2026-08-12 需求对齐：临床可代录日记）
+# ⇒ 这里自然得出 {parent_assistant, doctor_assistant}。
 NUTRITION_ASSESSMENT_WRITE_ALLOWED: frozenset[str] = _matrix_writers("CKDNutri-nutrition-mcp")
 NUTRITION_ASSESSMENT_DATA_TOOLS: frozenset[str] = frozenset({
     "upsert_food_diary",
@@ -384,6 +396,9 @@ NUTRITION_ASSESSMENT_DATA_ROLES: frozenset[str] = frozenset({
 NUTRITION_ASSESSMENT_CLINICAL_TOOLS: frozenset[str] = frozenset({
     "calc_prnt_targets", "assess_intake_vs_target", "assess_pew_risk",
     "calc_growth_zscore", "record_pew_risk", "get_pew_history",
+    # 2026-08-12 补登记：recipe 组与 DAG 一键评估同属临床工具（需求 recipe/clinical 组仅临床 ✔）
+    "generate_meal_plan", "get_meal_plan_nutrients",
+    "comprehensive_nutrition_assessment",
 })
 NUTRITION_ASSESSMENT_CLINICAL_ROLES: frozenset[str] = frozenset({"doctor_assistant"})
 

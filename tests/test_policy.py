@@ -40,6 +40,7 @@ from a207_policy import (  # noqa: E402
     PermissionDenied,
     as_caller,
     check_permission,
+    detect_write_tool,
     enforce_nutrition_tool,
     enforce_read,
     enforce_write,
@@ -128,7 +129,7 @@ def _matrix_size():
 def _matrix_no_dup_keys():
     expected = {
         "CKDNutri-clinical-data-mcp": {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_LIMITED, "risk_warning": ACCESS_READ},
-        "CKDNutri-nutrition-mcp":     {"doctor_assistant": ACCESS_READ, "parent_assistant": ACCESS_RW, "risk_warning": ACCESS_NONE},
+        "CKDNutri-nutrition-mcp":     {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_RW, "risk_warning": ACCESS_NONE},
         "CKDNutri-care-mcp":          {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_READ, "risk_warning": ACCESS_RW},
         "CKDNutri-assessment-mcp":    {"doctor_assistant": ACCESS_READ, "parent_assistant": ACCESS_NONE, "risk_warning": ACCESS_READ},
         "CKDNutri-content-mcp":       {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_LIMITED, "risk_warning": ACCESS_READ},
@@ -244,8 +245,8 @@ def _nutrition_write_derived():
     )
     assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == _matrix_writers("CKDNutri-nutrition-mcp"), \
         "写白名单未与矩阵保持一致"
-    assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == frozenset({"parent_assistant"}), \
-        f"营养写白名单={NUTRITION_ASSESSMENT_WRITE_ALLOWED}，期望 {{parent_assistant}}"
+    assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == frozenset({"parent_assistant", "doctor_assistant"}), \
+        f"营养写白名单={NUTRITION_ASSESSMENT_WRITE_ALLOWED}，期望 {{parent_assistant, doctor_assistant}}（需求 2026-08-12：临床可代录日记）"
 
 
 @check("LIS 写白名单由矩阵派生；FOLLOWUP 强制收口为仅医生（有意识不派生，防 risk 误写随访落盘）；NOTIFY 写白名单由矩阵派生——三个集合并存且均为确定性")
@@ -292,6 +293,20 @@ def _write_policy_allowed_registered():
             if c not in CALLERS:
                 bad.append(f"{tool} 允许了未登记角色 {c}")
     assert not bad, bad
+
+
+@check("BUG-23 回归：get_adherence_score 必须显式登记 WRITE_TOOL_POLICY（防矩阵放宽后误放行）")
+def _adherence_registered():
+    # 依从性评分落库是写操作（OD-014），若未登记写工具白名单，
+    # enforce_write 会回退到矩阵 R/W 判定——将来 care×parent 若改 R/W 即被意外放行。
+    assert "get_adherence_score" in WRITE_TOOL_POLICY, \
+        "get_adherence_score 必须登记 WRITE_TOOL_POLICY"
+    policy = WRITE_TOOL_POLICY["get_adherence_score"]
+    assert policy["mcp"] == "CKDNutri-care-mcp"
+    assert policy["allowed"] == frozenset({"doctor_assistant"}), \
+        f"get_adherence_score allowed={policy['allowed']}，期望 {{doctor_assistant}}"
+    # detect_write_tool 必须能把它识别为写工具
+    assert detect_write_tool("get_adherence_score") == "get_adherence_score"
 
 
 @check("矩阵↔写策略一致：非豁免写工具，allowed 角色在矩阵必须 R/W")
@@ -394,16 +409,12 @@ def _doctor_calc_no_keyerror():
 
 @check("enforce_nutrition_tool：家长写 upsert_food_diary 放行")
 def _parent_upsert_diary():
-    assert enforce_nutrition_tool("parent_assistant", "upsert_food_diary") == ACCESS_LIMITED
+    assert enforce_nutrition_tool("parent_assistant", "upsert_food_diary") == ACCESS_RW
 
 
-@check("enforce_nutrition_tool：医生写 upsert_food_diary 拒绝（仅家长）")
-def _doctor_no_upsert_diary():
-    try:
-        enforce_nutrition_tool("doctor_assistant", "upsert_food_diary")
-    except PermissionDenied:
-        return
-    raise AssertionError("医生竟能写饮食日记")
+@check("enforce_nutrition_tool：医生写 upsert_food_diary 放行（需求 2026-08-12：临床=✔）")
+def _doctor_upsert_diary():
+    assert enforce_nutrition_tool("doctor_assistant", "upsert_food_diary") == ACCESS_RW
 
 
 @check("enforce_nutrition_tool：家长读 get_food_diary_summary 放行")
@@ -496,6 +507,45 @@ def main() -> int:
     failed = len(RESULTS) - passed
     print(f"\n合计 {len(RESULTS)} 项：通过 {passed}，失败 {failed}")
     return 1 if failed else 0
+
+
+# --------------------------------------------------------- BUG-36：监护人令牌统一校验
+
+@check("BUG-36 回归：verify_guardian_token 含过期校验 + 恒定时间比对")
+def _guardian_token_verify():
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from a207_policy import verify_guardian_token
+    from a207_policy.gate import _guardian_store_path
+
+    tmp = tempfile.mkdtemp(prefix="a207-policy-token-")
+    os.environ["A207_GUARDIAN_TOKEN_DIR"] = tmp  # 隔离到临时目录，不污染全局状态
+    store = _guardian_store_path()
+    payload = {
+        "P0001": {
+            "token": "tok-abc-123",
+            "issued_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "issued_by": "doctor_assistant",
+        },
+    }
+    store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    # 有效期内：匹配
+    assert verify_guardian_token("P0001", "tok-abc-123") is True
+    # 错误令牌
+    assert verify_guardian_token("P0001", "wrong-token") is False
+    # 过期：即使令牌正确也失效（BUG-30 核心：P2 此前缺此校验）
+    payload["P0001"]["expires_at"] = "2020-01-01T00:00:00+00:00"
+    store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert verify_guardian_token("P0001", "tok-abc-123") is False
+    # 无 expires_at 旧令牌：向后兼容
+    del payload["P0001"]["expires_at"]
+    store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert verify_guardian_token("P0001", "tok-abc-123") is True
+    # 不存在的患儿
+    assert verify_guardian_token("P9999", "tok-abc-123") is False
+    os.environ.pop("A207_GUARDIAN_TOKEN_DIR", None)
 
 
 if __name__ == "__main__":

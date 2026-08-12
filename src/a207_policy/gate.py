@@ -9,7 +9,11 @@
 
 from __future__ import annotations
 
+import hmac
+import json
+import os
 import re
+from datetime import datetime, timezone
 
 from .caller import get_caller
 from .exceptions import CallerError, PermissionDenied
@@ -28,6 +32,7 @@ from .matrix import (
     normalize_mcp,
     resolve_access,
 )
+from .state import resolve_state_path
 
 _ALIASES = WRITE_TOOL_ALIASES  # 别名引用，保持 detect_write_tool 可读
 
@@ -40,8 +45,9 @@ _UNDERSCORE_PREFIXES = tuple(p for p in (
 
 # OD-010 选项 A（已落地）：M3 是「计算+数据」混合包，工具级 ACL（enforce_nutrition_tool）
 # 在矩阵（MCP 粒度）之下做细分授权：
-#   - upsert_food_diary（写日记）：仅家长/患儿，比矩阵 M3×家长=RL 更宽 → 豁免矩阵 R/W 校验
-#   - record_pew_risk（落 PEW 历史）：仅临床角色，比矩阵 M3×临床=READ 更宽 → 豁免矩阵 R/W 校验
+#   - upsert_food_diary（写日记）：家长/医生（2026-08-12 需求对齐，临床=✔ 家庭=✔），
+#     比矩阵 M3×临床=READ 更宽 → 豁免矩阵 R/W 校验
+#   - record_pew_risk（落 PEW 历史）：仅临床角色，比矩阵 M3×临床=R/W 更宽 → 豁免矩阵 R/W 校验
 # 这两个写工具是「工具级白名单治理」的有意例外，红队 B7b 亦据此跳过（见 tests/red_team_probe.py）。
 _MATRIX_EXEMPT_WRITE_TOOLS: frozenset[str] = frozenset(
     {"upsert_food_diary", "record_pew_risk"})
@@ -150,26 +156,27 @@ def enforce_write(mcp_name: str, tool: str | None = None) -> str:
 def enforce_nutrition_tool(caller: str, tool: str) -> str:
     """M3 工具级授权（OD-010 选项 A）：数据面写仅家长/患儿，数据面读 + 计算面仅临床角色。
 
-    M3 是「计算 + 数据」混合包。矩阵对 M3 仅做 MCP 粒度授权（家长=R/W、临床=READ、
+    M3 是「计算 + 数据」混合包。矩阵对 M3 仅做 MCP 粒度授权（家长=R/W、临床=R/W、
     risk=-），无法表达"同包内某些工具家长能写、某些只能临床角色算"。
     故在此做工具级细分（单一事实源在 matrix 模块）：
-    - 数据面·写 upsert_food_diary：仅家长/患儿（与 MX-3 WRITE_TOOL_POLICY /
-      core._WRITE_ALLOWED_CALLERS 一致，单一事实源）
+    - 数据面·写 upsert_food_diary：家长/医生（需求 2026-08-12 对齐，临床=✔ 家庭=✔；
+      与 MX-3 WRITE_TOOL_POLICY / core._WRITE_ALLOWED_CALLERS 一致，单一事实源）
     - 数据面·读 get_food_diary_summary：家长/患儿/临床角色（临床需读日记做评估）
     - 计算面·临床判读/落库（calc_prnt_targets / assess_intake_vs_target / assess_pew_risk /
-      calc_growth_zscore / record_pew_risk / get_pew_history）：仅 doctor（临床角色）
+      calc_growth_zscore / record_pew_risk / get_pew_history / generate_meal_plan /
+      get_meal_plan_nutrients / comprehensive_nutrition_assessment）：仅 doctor（临床角色）
     未登记工具 fail-closed 拒绝。caller 为已校验身份字符串（由调用方经 get_caller() 取得）。
     """
     if caller not in CALLERS:
         raise PermissionDenied(
             caller, "CKDNutri-nutrition-mcp", tool, "caller 未登记")
-    # 数据面·写：饮食日记写入仅家长/患儿（与 MX-3 写权收口一致，单一事实源）
+    # 数据面·写：饮食日记写入家长/医生（与 MX-3 写权收口一致，单一事实源）
     if tool == "upsert_food_diary":
         if caller in NUTRITION_ASSESSMENT_WRITE_ALLOWED:
-            return "RL"
+            return PERMISSION_MATRIX["CKDNutri-nutrition-mcp"][caller]
         raise PermissionDenied(
             caller, "CKDNutri-nutrition-mcp", tool,
-            "饮食日记写入仅限家长/患儿")
+            "饮食日记写入仅限家长/医生")
     # 数据面·读：日记摘要家长/患儿/临床角色可读
     if tool in NUTRITION_ASSESSMENT_DATA_TOOLS:
         if caller in NUTRITION_ASSESSMENT_DATA_ROLES:
@@ -225,3 +232,50 @@ def _enforce(mcp_name: str, action: str) -> str:
 def knowledge_profile(caller: str) -> str:
     """M12 按 caller 切语料 profile。"""
     return KNOWLEDGE_PROFILE.get((caller or "").strip(), "none")
+
+
+# ---------------------------------------------------------------------------
+# 监护人令牌统一校验（BUG-36，2026-08-12）
+# ---------------------------------------------------------------------------
+# 此前 P1 his.py 与 P2 nutrition/core.py 各自维护一份 _token_matches 副本，
+# P1 有 expires_at 过期校验、P2 没有 → 令牌轮换后旧令牌在 P2 仍有效（副本漂移）。
+# 收敛到本函数作为唯一实现：恒定时间比对 + 过期 fail-closed + 无过期字段旧令牌向后兼容。
+# 令牌状态库（guardian_tokens.json）与 P1 his.issue_guardian_token 共享同一路径。
+GUARDIAN_TOKEN_STORE = "guardian_tokens.json"
+GUARDIAN_TOKEN_DIR_ENV = "A207_GUARDIAN_TOKEN_DIR"
+
+
+def _guardian_store_path() -> "os.PathLike[str]":
+    base = os.environ.get(GUARDIAN_TOKEN_DIR_ENV)
+    return resolve_state_path(GUARDIAN_TOKEN_STORE, base=base)
+
+
+def _load_guardian_tokens() -> dict:
+    p = _guardian_store_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def verify_guardian_token(patient_id: str, guardian_token: str) -> bool:
+    """校验监护人令牌是否有效（存在 + 未过期 + 恒定时间比对）。
+
+    - 患儿无令牌 / 令牌过期 / 比对失败 → False（统一走恒定时间路径，防枚举时序差）
+    - 无 expires_at 字段的旧令牌 → 向后兼容视为有效
+    """
+    entry = _load_guardian_tokens().get(patient_id)
+    if not isinstance(entry, dict):
+        return hmac.compare_digest("", guardian_token or "")
+    expires_at = entry.get("expires_at")
+    if expires_at:
+        try:
+            expired = datetime.now(timezone.utc) > datetime.fromisoformat(expires_at)
+        except ValueError:
+            expired = True  # 无法解析的过期时间一律视为已过期（fail-closed）
+        if expired:
+            return hmac.compare_digest("", guardian_token or "")
+    stored = entry.get("token", "")
+    return hmac.compare_digest(stored, guardian_token or "")

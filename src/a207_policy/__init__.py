@@ -12,6 +12,19 @@ Plan A 单一事实源。5 个 CKDNutri MCP (P1–P5) 统一依赖本包：
 
 from __future__ import annotations
 
+from importlib import metadata as _metadata
+
+
+def _pkg_version() -> str:
+    """从安装元数据读取版本（P2-6：与 pyproject.toml 单一事实源对齐）。未安装时回退 "0.0.0"。"""
+    try:
+        return _metadata.version("a207-policy")
+    except _metadata.PackageNotFoundError:
+        return "0.0.0"
+
+
+__version__ = _pkg_version()
+
 from .caller import as_caller, get_caller, set_caller
 from .exceptions import CallerError, CallerUnknown, PermissionDenied
 from .gate import (
@@ -23,6 +36,7 @@ from .gate import (
     enforce_write,
     is_write_action,
     knowledge_profile,
+    verify_guardian_token,
 )
 from .matrix import (
     ACCESS_LIMITED,
@@ -69,10 +83,11 @@ from .matrix import (
 from .state import atomic_write_json, resolve_state_path
 
 __all__ = [
+    "__version__",
     "CallerError", "CallerUnknown", "as_caller", "get_caller", "set_caller",
     "PermissionDenied", "check_permission", "detect_write_tool",
     "enforce_nutrition_tool", "enforce_read", "enforce_write", "is_write_action",
-    "knowledge_profile", "_MATRIX_EXEMPT_WRITE_TOOLS",
+    "knowledge_profile", "verify_guardian_token", "_MATRIX_EXEMPT_WRITE_TOOLS",
     "ACCESS_NONE", "ACCESS_READ", "ACCESS_LIMITED", "ACCESS_RW",
     "CALLERS", "CHILD_FORBIDDEN_MCPS", "CLINICAL_CALC_MCP", "CLINICIAN_ONLY_FIELDS",
     "CLINICIAN_ONLY_HIDDEN_FROM",
