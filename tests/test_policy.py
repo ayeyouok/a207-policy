@@ -417,9 +417,16 @@ def _doctor_upsert_diary():
     assert enforce_nutrition_tool("doctor_assistant", "upsert_food_diary") == ACCESS_RW
 
 
-@check("enforce_nutrition_tool：家长读 get_food_diary_summary 放行")
+@check("enforce_nutrition_tool：家长读 get_food_diary_summary 放行（返回矩阵值）")
 def _parent_read_diary_summary():
-    assert enforce_nutrition_tool("parent_assistant", "get_food_diary_summary") == ACCESS_LIMITED
+    # 2026-08-13（policy 审查）：返回值由硬编码 "RL" 改为矩阵值（M3×parent=RW）——
+    # 此前 doctor（矩阵 RW）读摘要也被返回 RL，与矩阵语义不一致。
+    assert enforce_nutrition_tool("parent_assistant", "get_food_diary_summary") == ACCESS_RW
+
+
+@check("enforce_nutrition_tool：医生读 get_food_diary_summary 返回矩阵值 RW")
+def _doctor_read_diary_summary():
+    assert enforce_nutrition_tool("doctor_assistant", "get_food_diary_summary") == ACCESS_RW
 
 
 @check("enforce_nutrition_tool：未登记工具 fail-closed 拒绝")

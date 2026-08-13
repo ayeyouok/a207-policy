@@ -47,10 +47,11 @@ _UNDERSCORE_PREFIXES = tuple(p for p in (
 # 在矩阵（MCP 粒度）之下做细分授权：
 #   - upsert_food_diary（写日记）：家长/医生（2026-08-12 需求对齐，临床=✔ 家庭=✔），
 #     比矩阵 M3×临床=READ 更宽 → 豁免矩阵 R/W 校验
-#   - record_pew_risk（落 PEW 历史）：仅临床角色，比矩阵 M3×临床=R/W 更宽 → 豁免矩阵 R/W 校验
-# 这两个写工具是「工具级白名单治理」的有意例外，红队 B7b 亦据此跳过（见 tests/red_team_probe.py）。
+# record_pew_risk 曾列于豁免但**不在 WRITE_TOOL_POLICY**（2026-08-13 审查发现：detect_write_tool
+# 识别不到 → 通用 enforce_write 矩阵 RW 回退使 parent 可越权）。已登记进
+# WRITE_TOOL_POLICY（allowed=doctor）并从本豁免移除——登记后通用闸门即可收口，豁免不再必要。
 _MATRIX_EXEMPT_WRITE_TOOLS: frozenset[str] = frozenset(
-    {"upsert_food_diary", "record_pew_risk"})
+    {"upsert_food_diary"})
 
 
 def detect_write_tool(text: str) -> str | None:
@@ -65,6 +66,10 @@ def detect_write_tool(text: str) -> str | None:
         if alias in lowered:
             return tool
     if _NOTIFY_RE.search(lowered):
+        # 2026-08-13（policy 审查）说明：未登记 notify_xxx 收口到 notify_physician 是
+        # **刻意 fail-closed**——notify_* 全归风险管线（allowed={risk_warning}），doctor 反被
+        # 收紧；risk_warning 对 care 矩阵本就是 RW（映射与否权限不变），无现行越权面。
+        # 新增 notify_* 工具必须登记 WRITE_TOOL_POLICY，勿依赖此兜底猜测。
         return "notify_physician"
     return None
 
@@ -124,6 +129,10 @@ def _check_write_tool(caller_id: str, mcp_id: str, access: str, tool: str) -> di
             return _perm(False, access, "write",
                          f"矩阵 {owner_mcp} x {caller_id} = "
                          f"{PERMISSION_MATRIX[owner_mcp][caller_id]}，无 R/W，拒绝 {tool}")
+    # 2026-08-13（policy 审查）：requires_confirmation 仅作**透传提示**，策略层拿不到
+    # 确认标志入参（如 physician_confirmed）无法强制——人在回路约束必须在**工具实现层**
+    # 校验。当前无 requires_confirmation=True 的登记工具（push_to_emr 幽灵登记已删），
+    # 未来登记此类工具时必须在实现层强制，勿依赖调用方自觉。
     return _perm(True, access, "write", f"MX-3 放行：{tool} 由 {caller_id} 执行",
                  tool=tool, requires_confirmation=bool(policy["requires_confirmation"]))
 
@@ -180,7 +189,11 @@ def enforce_nutrition_tool(caller: str, tool: str) -> str:
     # 数据面·读：日记摘要家长/患儿/临床角色可读
     if tool in NUTRITION_ASSESSMENT_DATA_TOOLS:
         if caller in NUTRITION_ASSESSMENT_DATA_ROLES:
-            return "RL"
+            # 2026-08-13（policy 审查）：返回**矩阵值**而非硬编码 "RL"——此前 doctor
+            # （矩阵 RW）读 get_food_diary_summary 也被返回 RL，与矩阵语义不一致；下游若
+            # 消费返回值会把医生视图误当受限视图。当前 nutrition core 不消费返回值
+            # （无实害），修正为矩阵值以保持单一事实源。
+            return PERMISSION_MATRIX["CKDNutri-nutrition-mcp"][caller]
         raise PermissionDenied(
             caller, "CKDNutri-nutrition-mcp", tool,
             "日记摘要仅限家长/患儿/临床角色")

@@ -216,12 +216,21 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "note": "打卡落点，供 sum_diet_intake 与食谱参考依从性；医生可代录（临床=✔）",
     },
     # M11 log_meal_checkin / award_badge 退役
-    "push_to_emr": {
-        "mcp": "CKDNutri-content-mcp",
+    "record_pew_risk": {
+        "mcp": "CKDNutri-nutrition-mcp",
+        # 2026-08-13（policy 审查）：补登记——此前不在 WRITE_TOOL_POLICY，通用
+        # enforce_write("CKDNutri-nutrition-mcp", tool="record_pew_risk") 经 detect_write_tool
+        # 识别不到 → 矩阵 RW 回退 → parent（矩阵=RW）可越权落 PEW 历史；实际收口仅靠
+        # nutrition 内部 enforce_nutrition_tool（工具级 ACL）。登记后通用闸门与工具级
+        # ACL 双保险；豁免列表中的该项同步移除（矩阵 M3×doctor=RW 回查可通过，无需豁免）。
         "allowed": frozenset({"doctor_assistant"}),
-        "requires_confirmation": True,
-        "note": "需调用方另传 physician_confirmed=true，人在回路",
+        "requires_confirmation": False,
+        "note": "落 PEW 历史点，仅临床角色（与 enforce_nutrition_tool 计算面口径一致）",
     },
+    # push_to_emr 登记已删除（2026-08-13 policy 审查）：content 包**未实现**该工具
+    # （幽灵登记），requires_confirmation 的 physician_confirmed 确认标志无强制点
+    # （策略层拿不到该入参）。待实现时重新登记，并必须在**工具实现层**强制校验
+    # physician_confirmed=true（人在回路），勿依赖调用方自觉。
     "notify_physician": {
         "mcp": "CKDNutri-care-mcp",
         "allowed": frozenset({"risk_warning"}),         # 仅管线身份
