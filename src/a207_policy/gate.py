@@ -43,6 +43,26 @@ _UNDERSCORE_PREFIXES = tuple(p for p in (
     "close_", "schedule_", "save_",
 ) if p.endswith("_"))
 
+# S6 修复（2026-08-13）：统一 patient_id 契约校验（单一事实源，与 P1 models 同款
+# 正则）。各 MCP 工具入口调用本函数，畸形 patient_id 不得进入存储/查询层——
+# 此前部分 HIS 工具入口未校验（P1 models 有，his.py 的 get_patient_profile /
+# verify_guardian_binding 等无），畸形 id 直插存储层。
+PATIENT_ID_PATTERN = re.compile(r"^P[0-9]{4,}$")
+
+
+def validate_patient_id(patient_id: Any) -> str:
+    """校验并规范化 patient_id（^P[0-9]{4,}$）。非法抛 ValueError（fail-closed）。
+
+    返回 strip 后的字符串；None/非字符串/不匹配正则一律拒绝。所有 MCP 工具入口
+    （含 HIS 只读、写库、令牌签发/核验）应统一调用，替代各自手写校验。
+    """
+    if not isinstance(patient_id, str):
+        raise ValueError(f"patient_id 必须为字符串，收到 {patient_id!r}")
+    pid = patient_id.strip()
+    if not PATIENT_ID_PATTERN.match(pid):
+        raise ValueError("patient_id 需匹配 ^P[0-9]{4,}$（如 P0007）")
+    return pid
+
 # OD-010 选项 A（已落地）：M3 是「计算+数据」混合包，工具级 ACL（enforce_nutrition_tool）
 # 在矩阵（MCP 粒度）之下做细分授权：
 #   - upsert_food_diary（写日记）：家长/医生（2026-08-12 需求对齐，临床=✔ 家庭=✔），
@@ -110,10 +130,10 @@ def check_permission(caller: str, mcp: str, action: str = "read") -> dict:
 def _check_write_tool(caller_id: str, mcp_id: str, access: str, tool: str) -> dict:
     policy = WRITE_TOOL_POLICY.get(tool)
     if policy is None:
-        # 未登记的写工具名：回到读写二分
-        allow = resolve_access(access, True)
-        return _perm(allow, access, "write",
-                     f"未登记写工具 {tool}，按矩阵 {mcp_id} x {caller_id} = {access} 判定")
+        # P1-1 修复（2026-08-13）：未登记写工具 fail-closed 拒绝（此前按矩阵 R/W 放行
+        # ——家长在矩阵 R/W 域拿到未收口写入口）。新增写工具必须显式登记。
+        return _perm(False, access, "write",
+                     f"写工具 {tool} 未登记 WRITE_TOOL_POLICY，fail-closed 拒绝（P1-1）")
     owner_mcp = str(policy["mcp"])
     allowed: frozenset[str] = policy["allowed"]
     if mcp_id != owner_mcp:
@@ -223,6 +243,14 @@ def _enforce(mcp_name: str, action: str) -> str:
         if policy is None:
             if not resolve_access(access, True):
                 raise PermissionDenied(caller, mcp, action, f"access={access} 不允许写")
+            # P1-1 修复（2026-08-13）：detect_write_tool 命中但 WRITE_TOOL_POLICY 未登记
+            # （如新加写工具忘登记）→ **fail-closed 拒绝**，不再按矩阵 R/W 放行。
+            # 此前"未登记写工具回退矩阵"会让家长在矩阵 R/W 域（如 P2）拿到未收口的
+            # 写入口；新增写工具必须显式登记 WRITE_TOOL_POLICY。
+            raise PermissionDenied(
+                caller, mcp, action,
+                f"写工具 {wt} 未登记 WRITE_TOOL_POLICY（fail-closed）："
+                f"新增写工具必须显式登记后再放行（P1-1）")
         elif mcp != policy["mcp"] or caller not in policy["allowed"]:
             raise PermissionDenied(caller, mcp, action, f"MX-3 写权受限: {wt}")
         else:
@@ -268,27 +296,58 @@ def _load_guardian_tokens() -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        # S7 修复（2026-08-13）：损坏/读取失败必须 fail-closed 抛错（与 P1 his.py
+        # _load_guardian_tokens 同语义）——此前静默返回 {} 会让**所有**家长绑定失效
+        # 且无任何提示（verify_guardian_token 全部返回 False，运维无从知晓原因），
+        # 而 his.py 端同样数据损坏会抛 RuntimeError → INTERNAL_ERROR。同一份数据的
+        # 两种失败语义不一致，且"静默失效"更危险（家长端表现为莫名全部无法绑定）。
+        raise RuntimeError(
+            f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 读取失败或 JSON 损坏，拒绝加载"
+            f"（防止绑定状态静默失效），请检查磁盘/恢复备份: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 数据类型错误：期望 dict，"
+            f"实际为 {type(data).__name__}，拒绝加载")
+    return data
 
 
 def verify_guardian_token(patient_id: str, guardian_token: str) -> bool:
     """校验监护人令牌是否有效（存在 + 未过期 + 恒定时间比对）。
 
-    - 患儿无令牌 / 令牌过期 / 比对失败 → False（统一走恒定时间路径，防枚举时序差）
+    - 患儿无令牌 / 令牌过期 / 比对失败 → False（fail-closed）
+    - S4 修复（2026-08-13）：**移除 fail-open 后门**——此前「缺条目/过期」分支
+      返回 hmac.compare_digest("", guardian_token or "")，空串令牌会命中
+      compare_digest("","")==True 被判定为「有效」；当前调用点有前置 if not
+      guardian_token 拦截所以未触发，但策略函数自身必须是 fail-closed 的默认
+      （未来任一调用点漏前置检查即构成越权绑定/写入口）。
+    - 恒定时间比对仅用于「有条目且未过期」的令牌比对（防枚举时序差）；
+      无条目/过期不比对（直接 False，无泄漏面）。
     - 无 expires_at 字段的旧令牌 → 向后兼容视为有效
     """
     entry = _load_guardian_tokens().get(patient_id)
     if not isinstance(entry, dict):
-        return hmac.compare_digest("", guardian_token or "")
+        # S4：缺条目直接 False——不得让空串令牌通过
+        return False
     expires_at = entry.get("expires_at")
     if expires_at:
         try:
-            expired = datetime.now(timezone.utc) > datetime.fromisoformat(expires_at)
-        except ValueError:
+            parsed = datetime.fromisoformat(str(expires_at))
+            # P1-8 修复（2026-08-13）：naive 时间戳（无时区，如 his.py 早期签发）与
+            # timezone.utc aware 比较会抛 TypeError（此前只捕 ValueError → 家长读路径
+            # 500）。naive 统一按 UTC 解释（签发方 his.py 用 timezone.utc 写入；历史
+            # 数据无时区视为 UTC），兼容两种形态。
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            expired = datetime.now(timezone.utc) > parsed
+        except (ValueError, TypeError):
             expired = True  # 无法解析的过期时间一律视为已过期（fail-closed）
         if expired:
-            return hmac.compare_digest("", guardian_token or "")
+            # S4：过期直接 False——不得让空串令牌通过
+            return False
     stored = entry.get("token", "")
+    # 无 stored token（数据异常）也 fail-closed，不比对空串
+    if not stored:
+        return False
     return hmac.compare_digest(stored, guardian_token or "")

@@ -542,16 +542,23 @@ def _guardian_token_verify():
     assert verify_guardian_token("P0001", "tok-abc-123") is True
     # 错误令牌
     assert verify_guardian_token("P0001", "wrong-token") is False
+    # S4 修复（2026-08-13）：空串令牌不得通过（fail-open 后门回归——
+    # 此前缺条目/过期分支 compare_digest("","")==True 会误判「有效」）
+    assert verify_guardian_token("P0001", "") is False
+    assert verify_guardian_token("P0001", None) is False
     # 过期：即使令牌正确也失效（BUG-30 核心：P2 此前缺此校验）
     payload["P0001"]["expires_at"] = "2020-01-01T00:00:00+00:00"
     store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     assert verify_guardian_token("P0001", "tok-abc-123") is False
+    # S4：过期 + 空串也必须 False（fail-closed，不因 compare_digest("","") 通过）
+    assert verify_guardian_token("P0001", "") is False
     # 无 expires_at 旧令牌：向后兼容
     del payload["P0001"]["expires_at"]
     store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     assert verify_guardian_token("P0001", "tok-abc-123") is True
-    # 不存在的患儿
+    # 不存在的患儿（S4：缺条目 + 空串 → False，而非 compare_digest("","")==True）
     assert verify_guardian_token("P9999", "tok-abc-123") is False
+    assert verify_guardian_token("P9999", "") is False
     os.environ.pop("A207_GUARDIAN_TOKEN_DIR", None)
 
 

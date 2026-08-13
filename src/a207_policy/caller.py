@@ -20,6 +20,19 @@ from typing import Iterator, Optional
 from .exceptions import CallerUnknown
 
 ENV_KEY = "A207_CALLER"
+# P0-2 修复（2026-08-13）：生产环境守卫——set_caller/as_caller 是测试提权通道，
+# 在生产环境（A207_ENV=production）必须硬禁用，防止任意调用方运行时改写身份。
+# 测试/联调环境不设 A207_ENV 或设 dev/test，守卫放行。
+PROD_ENV_VALUES = ("production", "prod")
+ENV_MODE_KEY = "A207_ENV"
+
+
+def _assert_not_production(caller_fn: str) -> None:
+    mode = (os.environ.get(ENV_MODE_KEY) or "").strip().lower()
+    if mode in PROD_ENV_VALUES:
+        raise RuntimeError(
+            f"{caller_fn} 是测试专用 API，禁止在生产环境（A207_ENV={mode}）调用——"
+            f"身份必须由部署配置注入（A207_CALLER），运行时改写即全量越权（P0-2）。")
 
 
 def get_caller() -> str:
@@ -39,7 +52,12 @@ def get_caller() -> str:
 
 
 def set_caller(value: Optional[str]) -> None:
-    """仅用于测试：覆盖 caller 来源（写入 A207_CALLER 环境变量）。生产代码不得调用。"""
+    """仅用于测试：覆盖 caller 来源（写入 A207_CALLER 环境变量）。生产代码不得调用。
+
+    P0-2 修复（2026-08-13）：生产环境（A207_ENV=production）调用即抛 RuntimeError——
+    身份改写=全量越权，测试通道不得在产线开启。
+    """
+    _assert_not_production("set_caller")
     if value is None:
         os.environ.pop(ENV_KEY, None)
     else:
@@ -69,7 +87,10 @@ def as_caller(value: Optional[str]) -> Iterator[None]:
     对「全局 a207_policy」和「随包内置的 _policy 子模块」都生效——二者读到同一份
     进程级身份，不会因为模块被复制成多份而出现状态漂移。
     传 None 表示"模拟身份完全缺失"，用来测 fail-closed（会清掉该环境变量）。
+
+    P0-2 修复（2026-08-13）：生产环境（A207_ENV=production）调用即抛 RuntimeError。
     """
+    _assert_not_production("as_caller")
     prev = os.environ.get(ENV_KEY)
     if value is None:
         os.environ.pop(ENV_KEY, None)

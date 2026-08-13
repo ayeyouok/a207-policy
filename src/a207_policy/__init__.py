@@ -36,6 +36,7 @@ from .gate import (
     enforce_write,
     is_write_action,
     knowledge_profile,
+    validate_patient_id,
     verify_guardian_token,
 )
 from .matrix import (
@@ -87,7 +88,7 @@ __all__ = [
     "CallerError", "CallerUnknown", "as_caller", "get_caller", "set_caller",
     "PermissionDenied", "check_permission", "detect_write_tool",
     "enforce_nutrition_tool", "enforce_read", "enforce_write", "is_write_action",
-    "knowledge_profile", "verify_guardian_token", "_MATRIX_EXEMPT_WRITE_TOOLS",
+    "knowledge_profile", "validate_patient_id", "verify_guardian_token", "_MATRIX_EXEMPT_WRITE_TOOLS",
     "ACCESS_NONE", "ACCESS_READ", "ACCESS_LIMITED", "ACCESS_RW",
     "CALLERS", "CHILD_FORBIDDEN_MCPS", "CLINICAL_CALC_MCP", "CLINICIAN_ONLY_FIELDS",
     "CLINICIAN_ONLY_HIDDEN_FROM",

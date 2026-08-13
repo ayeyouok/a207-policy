@@ -113,15 +113,19 @@ def normalize_mcp(name: str) -> str:
 MX1_BLOCKED_CALLERS: frozenset[str] = frozenset({"parent_assistant"})
 
 # ---------------------------------------------------------------- MX-1 字段可见性边界
+# P0-4/P0-5/P1-4 统一修复（2026-08-13）：CLINICIAN_ONLY_FIELDS 重定义为**临床判读字段**
+# （家长绝不可见的"判读/内部"类），**不再含化验原始数值**——
+# 2026-08-13 用户决策：家长对化验原始数值有知情权（P1 get_labs/get_lab_trend/
+# get_critical_values 返回 parent_full），"数值给、判读不给"。此前本集合把 scr_umol_L
+# 等 16 个化验键一并列入"绝不可见"，与 P1 放行行为**背离**（同一化验 P1 可见、P5 报告
+# 被裁，自相矛盾）。现收敛为纯判读字段：医生备注/EMR 状态/临床确认/危急值标记/
+# 等级修正/生长判读（Z 分、分期确认）。化验数值由调用方按角色显式放行。
 CLINICIAN_ONLY_FIELDS: frozenset[str] = frozenset({
     "note_to_clinician", "clinician_note", "doctor_note", "doctor_notes", "internal_note", "note_to_doctor",
     "emr_status", "push_to_emr", "physician_confirmed",
-    "scr_umol_L", "egfr_ml_min", "k_mmol_L", "p_mmol_L", "ca_mmol_L", "na_mmol_L",
-    "cl_mmol_L", "bun_mmol_L", "albumin_g_L", "prealbumin_mg_L", "hb_g_L",
-    "ipth_pg_mL", "vitd25oh_nmol_L", "ua_umol_L", "urine_protein_g_24h", "upcr_mg_mmol",
     "critical_value", "critical_flag",
     "prior_level", "level_correction",
-    "nutrition_ceiling", "stage_confirmed_by", "z_score_height",
+    "stage_confirmed_by", "z_score_height",
 })
 
 # 上述字段「绝不可见」的角色（家庭助手）。M9 报告层据此做受限脱敏（OD-013）。
@@ -281,6 +285,15 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "requires_confirmation": False,
         "note": "通用通知创建，医生助手和风险管线可发",
     },
+    # S10 修复（2026-08-13）：末端事件翻译写通知的工具入口显式登记——此前
+    # build_event_notification 未登记，其鉴权隐式依赖下游 create_notification；
+    # 现入口自身 enforce_write（登记权与 create_notification 同：doctor/risk_warning）。
+    "build_event_notification": {
+        "mcp": "CKDNutri-care-mcp",
+        "allowed": frozenset({"doctor_assistant", "risk_warning"}),
+        "requires_confirmation": False,
+        "note": "末端事件（followup_due/risk_escalation/report_ready）翻译为标准通知写入",
+    },
     # 闭环状态机推移：仅临床助手（需求 §5.1「仅 CKD 临床助手」），risk_warning 管线身份不得推移人工闭环。
     # 2026-08-12 补登记：此前未登记导致回退矩阵 R/W 判定，risk_warning 可越权推移状态机。
     "update_notification_status": {
@@ -291,9 +304,13 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
     },
     "escalate_notification": {
         "mcp": "CKDNutri-care-mcp",
-        "allowed": frozenset({"doctor_assistant"}),
+        # G1 修复（2026-08-13）：HAIP 24h 自动升级以 risk_warning 管线身份调用——
+        # 此前仅 doctor，risk_warning 调用必 403，v2.5 §5.1 承诺的"24h 自动升级"在
+        # 自动化身份下永远无法执行。现加 risk_warning（HAIP 定时器/读时惰性检查），
+        # doctor 保留临床主动升级能力。
+        "allowed": frozenset({"doctor_assistant", "risk_warning"}),
         "requires_confirmation": False,
-        "note": "BUG-46：标记通知升级（escalated 独立布尔，与 workflow_status 正交），仅临床助手；HAIP 自动升级也经此登记落审计",
+        "note": "BUG-46：标记通知升级（escalated 独立布尔，与 workflow_status 正交）；G1 修复：risk_warning=HAIP 24h 自动升级身份",
     },
 }
 # 值实际结构遵循 WriteToolPolicy（内层仍为 mappingproxy 只读代理，深冻结不变）
