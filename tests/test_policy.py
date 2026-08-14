@@ -367,13 +367,17 @@ def _parent_write_diary():
         enforce_write("CKDNutri-nutrition-mcp", tool="upsert_food_diary")
 
 
-@check("enforce_write：医生 push_to_emr 放行（content×doctor=RW 回查通过）")
+@check("enforce_write：医生 push_to_emr 拒绝（P-B3 退役写工具，此前英文直传被矩阵放行）")
 def _doctor_push_emr():
     with as_caller("doctor_assistant"):
-        enforce_write("CKDNutri-content-mcp", tool="push_to_emr")
+        try:
+            enforce_write("CKDNutri-content-mcp", tool="push_to_emr")
+        except PermissionDenied:
+            return
+        raise AssertionError("退役写工具 push_to_emr 竟被放行")
 
 
-@check("enforce_write：家长 push_to_emr 拒绝（不在 allowed 且矩阵非 R/W）")
+@check("enforce_write：家长 push_to_emr 拒绝（退役工具，与医生一致）")
 def _parent_no_push_emr():
     with as_caller("parent_assistant"):
         try:
@@ -409,7 +413,9 @@ def _doctor_calc_no_keyerror():
 
 @check("enforce_nutrition_tool：家长写 upsert_food_diary 放行")
 def _parent_upsert_diary():
-    assert enforce_nutrition_tool("parent_assistant", "upsert_food_diary") == ACCESS_RW
+    # P-B1（2026-08-14）：caller 参数必须与进程注入身份一致——用 as_caller 对齐
+    with as_caller("parent_assistant"):
+        assert enforce_nutrition_tool("parent_assistant", "upsert_food_diary") == ACCESS_RW
 
 
 @check("enforce_nutrition_tool：医生写 upsert_food_diary 放行（需求 2026-08-12：临床=✔）")
@@ -421,7 +427,9 @@ def _doctor_upsert_diary():
 def _parent_read_diary_summary():
     # 2026-08-13（policy 审查）：返回值由硬编码 "RL" 改为矩阵值（M3×parent=RW）——
     # 此前 doctor（矩阵 RW）读摘要也被返回 RL，与矩阵语义不一致。
-    assert enforce_nutrition_tool("parent_assistant", "get_food_diary_summary") == ACCESS_RW
+    # P-B1（2026-08-14）：caller 参数必须与进程注入身份一致
+    with as_caller("parent_assistant"):
+        assert enforce_nutrition_tool("parent_assistant", "get_food_diary_summary") == ACCESS_RW
 
 
 @check("enforce_nutrition_tool：医生读 get_food_diary_summary 返回矩阵值 RW")

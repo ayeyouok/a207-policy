@@ -320,7 +320,6 @@ WRITE_TOOL_POLICY: Mapping[str, WriteToolPolicy] = cast(
 )
 
 WRITE_TOOL_ALIASES: dict[str, str] = {
-    "写回病历": "push_to_emr", "写入病历": "push_to_emr", "推送病历": "push_to_emr",
     "录入化验": "upsert_lab_result", "写入化验": "upsert_lab_result",
     "新增生化": "upsert_lab_result", "新增检验": "upsert_lab_result",
     "记录饮食日记": "upsert_food_diary", "录入饮食": "upsert_food_diary",
@@ -335,6 +334,17 @@ WRITE_TOOL_ALIASES: dict[str, str] = {
     "创建通知": "create_notification", "发送通知": "create_notification",
     "计算依从性": "get_adherence_score", "落库依从性": "get_adherence_score",
 }
+
+# P-B3 修复（2026-08-14）：**退役写工具黑名单**——push_to_emr 的 WRITE_TOOL_POLICY
+# 登记已删除（content 包未实现，幽灵登记），但此前 WRITE_TOOL_ALIASES 仍保留
+# 「写回病历→push_to_emr」别名：中文"写回病历"经别名解析命中未登记工具 → P1-1
+# fail-closed 拒绝；英文"push_to_emr"直传时 detect_write_tool 未命中（policy 无）
+# → 回退矩阵 R/W **被放行**——同一操作中英文结论相反。现在：
+# ① 上方别名已删除；② 命中黑名单的写动作一律拒绝（明确报"已退役"）。
+RETIRED_WRITE_TOOLS: frozenset[str] = frozenset({
+    "push_to_emr",   # content 包未实现；实现时须在工具层强制 physician_confirmed
+    "写回病历", "写入病历", "推送病历",  # 已删别名文本（防旧输入走矩阵 R/W 放行）
+})
 
 # 注：写工具判定唯一依据为 WRITE_TOOL_POLICY（detect_write_tool 直接查字典），
 # 不存在基于前缀或中文提示词的试探性判定。get_adherence_score 虽以 get_ 开头，但已在

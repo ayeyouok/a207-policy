@@ -27,6 +27,7 @@ from .matrix import (
     NUTRITION_ASSESSMENT_DATA_TOOLS,
     NUTRITION_ASSESSMENT_WRITE_ALLOWED,
     PERMISSION_MATRIX,
+    RETIRED_WRITE_TOOLS,
     WRITE_TOOL_POLICY,
     WRITE_TOOL_ALIASES,
     normalize_mcp,
@@ -99,7 +100,11 @@ def is_write_action(action: str) -> bool:
     if any(lowered.startswith(prefix) for prefix in (
         "write", "create", "update", "delete", "insert")):
         return True
-    if any(prefix in lowered for prefix in _UNDERSCORE_PREFIXES):
+    # P-B4 修复（2026-08-14）：下划线前缀须在**词边界**匹配——此前 `prefix in lowered`
+    # 子串命中，"log_" 会误命中 "dialog_analysis"（d-ia-LOG_-analysis 内含 log_）等
+    # 合法读工具名 → P1×parent 等 R 权限角色被误伤拒绝。加前导 "_" 构造词边界：
+    # 仅当前缀出现在开头或前一个字符是下划线时才算命中。
+    if any(("_" + prefix) in ("_" + lowered) for prefix in _UNDERSCORE_PREFIXES):
         return True
     return any(hint in lowered for hint in ("写入", "写回", "新增一条", "保存到", "提交写"))
 
@@ -179,6 +184,13 @@ def enforce_read(mcp_name: str, tool: str | None = None) -> str:
 
 def enforce_write(mcp_name: str, tool: str | None = None) -> str:
     """入口守卫：caller 是否可写 mcp_name（tool 为写工具名时走 MX-3）。"""
+    # P-B2 修复（2026-08-14）："read" 是动作保留字，不是写工具名——此前
+    # enforce_write(mcp, "read") 会经 _enforce 的 `action != "read"` 判定静默降级为
+    # **读检查**（写入口按读权限放行，语义反转）。显式 fail-closed 拒绝。
+    if tool is not None and str(tool).strip().lower() == "read":
+        raise PermissionDenied(
+            get_caller(), mcp_name, tool,
+            "'read' 是保留动作字，不是写工具名；enforce_write 不接受该值")
     return _enforce(mcp_name, tool or "write")
 
 
@@ -196,6 +208,14 @@ def enforce_nutrition_tool(caller: str, tool: str) -> str:
       get_meal_plan_nutrients / comprehensive_nutrition_assessment）：仅 doctor（临床角色）
     未登记工具 fail-closed 拒绝。caller 为已校验身份字符串（由调用方经 get_caller() 取得）。
     """
+    # P-B1 修复（2026-08-14）：caller 必须与进程注入身份一致——本函数接受 caller 参数
+    # 是历史契约（调用方经 get_caller() 传入），但公开 API 若被传任意已登记角色名即可
+    # 伪造身份（如硬编码 "doctor_assistant"）。与其他入口（enforce_read/write 内部
+    # get_caller）对齐：参数与内部身份不一致 → 拒绝（fail-closed）。
+    if caller != get_caller():
+        raise PermissionDenied(
+            caller, "CKDNutri-nutrition-mcp", tool,
+            "caller 参数与进程注入身份不一致（身份伪造被拒）")
     if caller not in CALLERS:
         raise PermissionDenied(
             caller, "CKDNutri-nutrition-mcp", tool, "caller 未登记")
@@ -238,6 +258,16 @@ def _enforce(mcp_name: str, action: str) -> str:
     access = PERMISSION_MATRIX[mcp][caller]
 
     wt = detect_write_tool(action) if action != "read" else None
+    # P-B3 修复（2026-08-14）：退役写工具 fail-closed——push_to_emr 等已删登记但
+    # 中文别名曾保留（中英文结论相反）；现在别名已删 + 此处拦截英文名直传（否则
+    # detect_write_tool 未命中会回退矩阵 R/W 放行幽灵工具）。
+    if action != "read":
+        _act_low = (action or "").strip().lower()
+        for _ret in RETIRED_WRITE_TOOLS:
+            if _ret in _act_low:
+                raise PermissionDenied(
+                    caller, mcp, action,
+                    f"写工具 {_ret} 已退役（未实现/已下线），拒绝执行")
     if wt:
         policy = WRITE_TOOL_POLICY.get(wt)
         if policy is None:
@@ -350,4 +380,9 @@ def verify_guardian_token(patient_id: str, guardian_token: str) -> bool:
     # 无 stored token（数据异常）也 fail-closed，不比对空串
     if not stored:
         return False
-    return hmac.compare_digest(stored, guardian_token or "")
+    # P-B6 修复（2026-08-14）：guardian_token 非字符串（None/int/list）→ 直接 False——
+    # 此前 compare_digest(stored, guardian_token or "") 对非字符串会抛 TypeError →
+    # 家长读路径 500（本应 fail-closed 返回 False）。
+    if not isinstance(guardian_token, str):
+        return False
+    return hmac.compare_digest(stored, guardian_token)
