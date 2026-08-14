@@ -237,32 +237,6 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
     },
     # push_to_emr 登记已删除（2026-08-13 policy 审查）：content 包**未实现**该工具
     # （幽灵登记），requires_confirmation 的 physician_confirmed 确认标志无强制点
-    # （策略层拿不到该入参）。待实现时重新登记，并必须在**工具实现层**强制校验
-    # physician_confirmed=true（人在回路），勿依赖调用方自觉。
-    "notify_physician": {
-        "mcp": "CKDNutri-care-mcp",
-        "allowed": frozenset({"risk_warning"}),         # 仅管线身份
-        "requires_confirmation": False,
-        "note": "推送前须过 24h 同规则去重",
-    },
-    "notify_parent": {
-        "mcp": "CKDNutri-care-mcp",
-        "allowed": frozenset({"risk_warning"}),
-        "requires_confirmation": False,
-        "note": "推送前须过 24h 同规则去重",
-    },
-    "trigger_warning_event": {
-        "mcp": "CKDNutri-care-mcp",
-        "allowed": frozenset({"risk_warning"}),
-        "requires_confirmation": False,
-        "note": "等级须由本轮新数据重评得出，禁止沿用历史等级",
-    },
-    "close_warning": {
-        "mcp": "CKDNutri-care-mcp",
-        "allowed": frozenset({"risk_warning"}),
-        "requires_confirmation": False,
-        "note": "关闭工单需留判定链路",
-    },
     "get_adherence_score": {
         "mcp": "CKDNutri-care-mcp",
         "allowed": frozenset({"doctor_assistant"}),     # v2.3: 删 nutritionist / orchestrator
@@ -329,9 +303,6 @@ WRITE_TOOL_ALIASES: dict[str, str] = {
     "记录饮食日记": "upsert_food_diary", "录入饮食": "upsert_food_diary",
     "写入饮食日记": "upsert_food_diary",
     # 打卡/勋章别名退役（M11 退役）
-    "推送医生": "notify_physician", "通知医生": "notify_physician",
-    "通知家长": "notify_parent", "发预警": "trigger_warning_event",
-    "触发预警": "trigger_warning_event", "关闭预警": "close_warning",
     # 新增写工具中文别名（与 WRITE_TOOL_POLICY 同步）
     "安排随访": "schedule_followup", "预约随访": "schedule_followup",
     "添加随访": "add_followup_record", "写入随访": "add_followup_record",
@@ -450,9 +421,10 @@ NUTRITION_ASSESSMENT_CLINICAL_ROLES: frozenset[str] = frozenset({"doctor_assista
 
 # --- M10 通知 ---
 # NOTIFY_WRITE_ROLES 用于通用通知 CRUD（create_notification），涵盖 {doctor, risk}。
-# 注：notify_* 触发器类工具（notify_physician / notify_parent 等）必须通过
-# enforce_write → gate._enforce → WRITE_TOOL_POLICY 进行校验（仅 risk_warning），
-# 不得使用 NOTIFY_WRITE_ROLES 做本地判定——否则 doctor 可绕过通知自动化管线。
+# 注：notify_* 触发器类工具（notify_physician / notify_parent / trigger_warning_event /
+# close_warning）为 risk_warning 管线预留接口——当前无实现（2026-08-14 已删幽灵登记，
+# 任何同名工具未来注册时被「未登记写工具 fail-closed」拦截，必须同时登记 WRITE_TOOL_POLICY）；
+# 通知 CRUD 用 NOTIFY_WRITE_ROLES（create_notification，{doctor, risk}）做本地判定。
 NOTIFY_WRITE_ROLES: frozenset[str] = _matrix_writers("CKDNutri-care-mcp")   # {doctor, risk}
 NOTIFY_READ_ROLES: frozenset[str] = _matrix_readers("CKDNutri-care-mcp")    # {doctor, parent, risk}
 # M11 游戏化 —— v2.3 阶段 0 退役，相关集合全部移除
