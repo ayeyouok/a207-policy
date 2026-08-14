@@ -18,21 +18,30 @@ from contextlib import contextmanager
 from typing import Iterator, Optional
 
 from .exceptions import CallerUnknown
+from .matrix import CALLERS
 
 ENV_KEY = "A207_CALLER"
-# P0-2 修复（2026-08-13）：生产环境守卫——set_caller/as_caller 是测试提权通道，
-# 在生产环境（A207_ENV=production）必须硬禁用，防止任意调用方运行时改写身份。
-# 测试/联调环境不设 A207_ENV 或设 dev/test，守卫放行。
-PROD_ENV_VALUES = ("production", "prod")
+# P0-2 修复（2026-08-13）+ N-SEC-1 修复（2026-08-14）：生产环境守卫——
+# set_caller/as_caller 是测试提权通道，在生产环境必须硬禁用，防止任意调用方
+# 运行时改写身份（全量越权）。
+# N-SEC-1：反转默认语义为 fail-closed——此前只认 A207_ENV=production 才拒绝，
+# 但全仓部署配置/测试均未注入 A207_ENV → 生产进程 A207_ENV 为空 → 守卫判定
+# 非生产放行 → set_caller 在产线仍可调用（P0-2 修复形同虚设）。现改为「除非
+# 显式声明 A207_ENV ∈ dev/test/local，否则一律按生产拒绝」；部署侧再由
+# deploy/generate_agent_configs.py 注入 A207_ENV=production 作为双保险。
+DEV_ENV_VALUES = ("dev", "test", "local")
 ENV_MODE_KEY = "A207_ENV"
 
 
 def _assert_not_production(caller_fn: str) -> None:
     mode = (os.environ.get(ENV_MODE_KEY) or "").strip().lower()
-    if mode in PROD_ENV_VALUES:
+    if mode not in DEV_ENV_VALUES:
+        hint = f"（A207_ENV={mode!r}）" if mode else "（A207_ENV 未设置）"
         raise RuntimeError(
-            f"{caller_fn} 是测试专用 API，禁止在生产环境（A207_ENV={mode}）调用——"
-            f"身份必须由部署配置注入（A207_CALLER），运行时改写即全量越权（P0-2）。")
+            f"{caller_fn} 是测试专用 API，当前环境未显式声明为测试 {hint}，"
+            f"一律按生产拒绝（N-SEC-1 fail-closed 默认）——身份必须由部署配置注入"
+            f"（A207_CALLER），运行时改写即全量越权（P0-2）。"
+            f"测试/联调请显式设置 A207_ENV ∈ {'/'.join(DEV_ENV_VALUES)}。")
 
 
 def get_caller() -> str:
@@ -48,14 +57,24 @@ def get_caller() -> str:
             f"caller 未注入：环境变量 {ENV_KEY} 缺失或为空。"
             f"服务端必须由部署配置注入身份，模型不可自证身份（P0-1 修复）。"
         )
+    # N-CALLER-1 修复（2026-08-14）：白名单校验（防御纵深，与 gate.enforce_read/
+    # enforce_write 的 `caller not in CALLERS` 兜底双保险）——未知字符串（如
+    # A207_CALLER=hacker）此前原样返回，下游 `if caller not in _CLINICIAN`、
+    # recorded_by、status_updated_by 等分支会把未知角色当「非临床（家长）视图」
+    # 处理，行为依赖隐式假设。直接拒绝使身份值域收敛到 CALLERS。
+    if value not in CALLERS:
+        raise CallerUnknown(
+            f"caller 不在白名单：{value!r}（合法角色：{', '.join(CALLERS)}）——"
+            f"未知身份一律拒绝（N-CALLER-1，fail-closed）。")
     return value
 
 
 def set_caller(value: Optional[str]) -> None:
     """仅用于测试：覆盖 caller 来源（写入 A207_CALLER 环境变量）。生产代码不得调用。
 
-    P0-2 修复（2026-08-13）：生产环境（A207_ENV=production）调用即抛 RuntimeError——
-    身份改写=全量越权，测试通道不得在产线开启。
+    P0-2 修复（2026-08-13）+ N-SEC-1（2026-08-14）：生产环境调用即抛 RuntimeError
+    （fail-closed 默认：未显式声明 A207_ENV ∈ dev/test 一律拒绝）——身份改写=全量越权，
+    测试通道不得在产线开启。
     """
     _assert_not_production("set_caller")
     if value is None:
@@ -88,7 +107,8 @@ def as_caller(value: Optional[str]) -> Iterator[None]:
     进程级身份，不会因为模块被复制成多份而出现状态漂移。
     传 None 表示"模拟身份完全缺失"，用来测 fail-closed（会清掉该环境变量）。
 
-    P0-2 修复（2026-08-13）：生产环境（A207_ENV=production）调用即抛 RuntimeError。
+    P0-2 修复（2026-08-13）+ N-SEC-1（2026-08-14）：生产环境调用即抛 RuntimeError
+    （fail-closed 默认，同 set_caller）。
     """
     _assert_not_production("as_caller")
     prev = os.environ.get(ENV_KEY)

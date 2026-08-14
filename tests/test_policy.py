@@ -15,6 +15,7 @@ a207-policy 是 5 个 CKDNutri MCP 包共同的信任根。它错一行，5 个�
 from __future__ import annotations
 
 import os
+os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 import sys
 import tempfile
 import traceback
@@ -116,6 +117,82 @@ def _as_caller_nested():
             assert get_caller() == "parent_assistant"
         assert get_caller() == "risk_warning"
     assert get_caller() == "doctor_assistant"
+
+
+# --------------------------------------------------------- N-SEC-1 / N-CALLER-1（2026-08-14）
+
+def _restore_env(key: str, prev: str | None) -> None:
+    if prev is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = prev
+
+
+@check("N-SEC-1：未显式声明测试环境 → set_caller/as_caller 一律拒绝（fail-closed 默认）")
+def _ns_sec1_default_rejects():
+    prev = os.environ.get("A207_ENV")
+    os.environ.pop("A207_ENV", None)
+    try:
+        try:
+            set_caller("parent_assistant")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("未设 A207_ENV 时 set_caller 应被拒绝（N-SEC-1 fail-closed）")
+        try:
+            with as_caller("parent_assistant"):
+                pass
+        except RuntimeError:
+            return
+        raise AssertionError("未设 A207_ENV 时 as_caller 应被拒绝（N-SEC-1 fail-closed）")
+    finally:
+        _restore_env("A207_ENV", prev)
+
+
+@check("N-SEC-1：A207_ENV=production/prod → 测试提权通道拒绝")
+def _ns_sec1_production_rejects():
+    prev = os.environ.get("A207_ENV")
+    try:
+        for mode in ("production", "prod"):
+            os.environ["A207_ENV"] = mode
+            try:
+                set_caller("parent_assistant")
+            except RuntimeError:
+                continue
+            raise AssertionError(f"A207_ENV={mode} 时 set_caller 应被拒绝")
+    finally:
+        _restore_env("A207_ENV", prev)
+
+
+@check("N-SEC-1：A207_ENV=dev/test → 测试提权通道放行（显式声明即测试环境）")
+def _ns_sec1_dev_allows():
+    prev_env = os.environ.get("A207_ENV")
+    prev_caller = os.environ.get("A207_CALLER")
+    try:
+        for mode in ("dev", "test"):
+            os.environ["A207_ENV"] = mode
+            set_caller("parent_assistant")
+            assert get_caller() == "parent_assistant"
+            with as_caller("doctor_assistant"):
+                assert get_caller() == "doctor_assistant"
+    finally:
+        _restore_env("A207_ENV", prev_env)
+        _restore_env("A207_CALLER", prev_caller)
+
+
+@check("N-CALLER-1：get_caller 白名单校验——未知身份拒绝（fail-closed）")
+def _ns_caller1_whitelist():
+    prev = os.environ.get("A207_CALLER")
+    try:
+        for bad in ("hacker", "unknown_role", "Doctor"):
+            os.environ["A207_CALLER"] = bad
+            try:
+                get_caller()
+            except CallerUnknown:
+                continue
+            raise AssertionError(f"未知身份 {bad!r} 未被拒绝（N-CALLER-1 白名单）")
+    finally:
+        _restore_env("A207_CALLER", prev)
 
 
 # --------------------------------------------------------- 矩阵完整性
