@@ -15,6 +15,10 @@ from typing import Mapping, TypedDict, cast
 
 # ---------------------------------------------------------------- 角色与 MCP
 
+# X4（2026-08-14）：角色命名单一事实源——各包禁止散落 "parent_assistant" 字符串
+# （此前 care/clinical-data/nutrition 共 6 处硬编码，与 CALLERS 双处维护漂移风险）。
+PARENT_ROLE: str = "parent_assistant"
+
 CALLERS: tuple[str, ...] = (
     "doctor_assistant",
     "parent_assistant",

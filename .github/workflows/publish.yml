@@ -30,6 +30,11 @@ jobs:
       - name: Clean previous builds
         run: rm -rf dist/ # 确保打包前 dist 目录纯净
 
+      - name: Run tests (X2, 2026-08-14)
+        run: |
+          python -m pip install --upgrade pip --user
+          export A207_STORAGE_BACKEND=json
+          for f in tests/test_*.py; do python "$f" || exit 1; done
       - name: Install build
         run: python -m pip install build --user
 
