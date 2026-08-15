@@ -24,7 +24,17 @@ def resolve_state_path(filename: str, *, base: str | None = None) -> Path:
 
     :param filename: 状态文件名，如 "followup_store.json"
     :param base: 测试可传入临时基目录覆盖环境变量
+
+    B3（2026-08-15）：filename 必须为**纯文件名**（不含路径分隔/../穿越）——此前仅
+    靠"调用点传常量"的隐式约定，未来任一调用点拼接用户输入（如 patient_id）即可
+    把状态文件写到任意目录（越权写/覆盖）。fail-closed：含路径成分即拒绝。
     """
+    if not isinstance(filename, str) or not filename:
+        raise ValueError("状态文件名不能为空")
+    name = filename.replace("\\", "/")
+    if "/" in name or ".." in name:
+        raise ValueError(
+            f"状态文件名必须是纯文件名（不含目录/../），收到：{filename!r}")
     if base:
         root = Path(base)
     else:

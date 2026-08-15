@@ -167,8 +167,12 @@ class TablestoreBase:
 
     def _put_row_conditioned(self, table: str, pk: list[tuple[str, str]],
                              attrs: dict[str, Any], rev: int,
-                             expect_exists: bool) -> None:
-        """条件写：_rev 必须等于 rev（乐观锁）。条件不满足抛 OTSClientError。"""
+                             expect_exists: bool, *, force: bool = False) -> None:
+        """条件写：_rev 必须等于 rev（乐观锁）。条件不满足抛 OTSClientError。
+
+        :param force: True 时跳过 _REV 列条件（仅保留行存在性期望）——S-4 用于
+          历史行（缺 _REV_COL）的无条件补列初始化。
+        """
         # 🔴 真实踩坑（2026-08-13）：此前 import SingleColumnValueCondition——该符号
         # 在 tablestore 6.x SDK **不存在**（正确类名 SingleColumnCondition），生产切
         # Tablestore 写即 ImportError。已修正并补 Fake 回归，勿再改回。
@@ -178,7 +182,7 @@ class TablestoreBase:
         expectation = (RowExistenceExpectation.EXPECT_EXIST if expect_exists
                        else RowExistenceExpectation.EXPECT_NOT_EXIST)
         col_cond = None
-        if expect_exists:
+        if expect_exists and not force:
             col_cond = SingleColumnCondition(
                 self._REV_COL, ComparatorType.EQUAL, rev)
         condition = Condition(expectation, col_cond)
@@ -206,6 +210,17 @@ class TablestoreBase:
             next_attrs = dict(attrs)
             if current:
                 next_attrs = _merge_row(current, next_attrs)  # S5：合并并发修改
+                # S-4（2026-08-15）：**历史行无 _REV_COL**（2026-08-13 乐观锁上线前
+                # 落库）——条件 `_REV_COL == 0` 对缺列恒不满足（列不存在 ≠ 等于 0），
+                # 首次更新 3 次重试后 INTERNAL_ERROR 且无自动修复路径。先**无条件
+                # 补列初始化**（force：仅行存在性期望，幂等无害），下一轮走正常
+                # 条件更新。
+                if self._REV_COL not in current:
+                    legacy = dict(next_attrs)
+                    legacy[self._REV_COL] = 0
+                    self._put_row_conditioned(
+                        table, pk, legacy, rev=0, expect_exists=True, force=True)
+                    continue
             next_attrs[self._REV_COL] = rev + 1
             try:
                 self._put_row_conditioned(
