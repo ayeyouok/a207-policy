@@ -130,6 +130,13 @@ CLINICIAN_ONLY_FIELDS: frozenset[str] = frozenset({
     "critical_value", "critical_flag",
     "prior_level", "level_correction",
     "stage_confirmed_by", "z_score_height",
+    # F-1（2026-08-15，第六轮审查）：P2 nutrition 评估实际输出的**判读类键**此前不在
+    # 清单 → P5 报告不剥除 → 家长报告透出 Z 分（haz/waz/baz）、PEW 判读
+    # （pew_risk/pew_rationale）、医嘱性方案（regimens/clinical_notes）与临床 flag，
+    # 违反"数值给、判读不给"决策（2026-08-13）。化验数值（energy/protein/钾磷钠等
+    # 原始量）仍家长可见，仅剥判读。
+    "haz", "waz", "baz", "whz",
+    "regimens", "clinical_notes", "pew_risk", "pew_rationale", "flags",
 })
 
 # 上述字段「绝不可见」的角色（家庭助手）。M9 报告层据此做受限脱敏（OD-013）。
