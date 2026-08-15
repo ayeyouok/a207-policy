@@ -164,10 +164,13 @@ _PERMISSION_MATRIX: dict[str, dict[str, str]] = {
     },
     "CKDNutri-care-mcp": {
         # doctor=R/W：临床助手可创建/确认通知
-        # parent=R：家庭助手读通知（含闭环状态查看）
+        # parent=R/W（#10，2026-08-15）：家庭助手读通知 + 确认已读（ack_notification
+        # 是家长写操作，需求 §5.2；与 upsert_food_diary 家长写口径一致）——此前
+        # parent=R，ack_notification 未登记 WRITE_TOOL_POLICY 时回退矩阵 R 放行
+        # 属"漏登记侥幸通过"，登记后矩阵必须同步为 RW 否则断言矛盾。
         # risk=R/W：管线身份写通知（notify_* 系列由 WRITE_TOOL_POLICY 钳制为 {risk_warning}）
         "doctor_assistant": ACCESS_RW,
-        "parent_assistant": ACCESS_READ,
+        "parent_assistant": ACCESS_RW,
         "risk_warning": ACCESS_RW,
     },
     "CKDNutri-assessment-mcp": {
@@ -289,6 +292,24 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "allowed": frozenset({"doctor_assistant", "risk_warning"}),
         "requires_confirmation": False,
         "note": "BUG-46：标记通知升级（escalated 独立布尔，与 workflow_status 正交）；G1 修复：risk_warning=HAIP 24h 自动升级身份",
+    },
+    # #10（2026-08-15）：补登记家长写操作——ack_notification 此前不在
+    # WRITE_TOOL_POLICY，detect_write_tool 识别不到 → 回退矩阵 care×parent 的
+    # R/W 标签放行（无越权，但违反"写工具必须显式登记"不变量，且与
+    # upsert_food_diary 等家长写工具登记口径不一致）。登记后通用闸门统一管辖。
+    "ack_notification": {
+        "mcp": "CKDNutri-care-mcp",
+        "allowed": frozenset({"parent_assistant", "doctor_assistant"}),
+        "requires_confirmation": False,
+        "note": "家长/医生确认通知已读（幂等，置 status=acked 不推进闭环；需求 §5.2）",
+    },
+    # #10（2026-08-15）：补登记 issue_guardian_token——P1 写操作（签发/轮换令牌），
+    # 此前依赖 his.py 内 GUARDIAN_ISSUERS 兜底（仅 doctor），通用闸门不感知。
+    "issue_guardian_token": {
+        "mcp": "CKDNutri-clinical-data-mcp",
+        "allowed": frozenset({"doctor_assistant"}),
+        "requires_confirmation": False,
+        "note": "签发监护人令牌（仅 doctor；内部 GUARDIAN_ISSUERS 双保险）",
     },
 }
 # 值实际结构遵循 WriteToolPolicy（内层仍为 mappingproxy 只读代理，深冻结不变）

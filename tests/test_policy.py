@@ -294,7 +294,7 @@ def _matrix_no_dup_keys():
     expected = {
         "CKDNutri-clinical-data-mcp": {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_LIMITED, "risk_warning": ACCESS_READ},
         "CKDNutri-nutrition-mcp":     {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_RW, "risk_warning": ACCESS_NONE},
-        "CKDNutri-care-mcp":          {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_READ, "risk_warning": ACCESS_RW},
+        "CKDNutri-care-mcp":          {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_RW, "risk_warning": ACCESS_RW},
         "CKDNutri-assessment-mcp":    {"doctor_assistant": ACCESS_READ, "parent_assistant": ACCESS_NONE, "risk_warning": ACCESS_READ},
         "CKDNutri-content-mcp":       {"doctor_assistant": ACCESS_RW, "parent_assistant": ACCESS_LIMITED, "risk_warning": ACCESS_READ},
     }
