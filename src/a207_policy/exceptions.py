@@ -19,6 +19,18 @@ from __future__ import annotations
 class CallerError(Exception):
     """权限/身份相关错误的基类。"""
 
+    # 2026-08-15（DRY 收敛）：FORBIDDEN 信封在 policy 内生成——此前 5 个 server 的
+    # _invalid 各自 getattr(exc, "caller"/"action"/"reason") 拼文案，server 层"看见"
+    # 了 caller（轻微打破"server 不感知身份"）。现由异常类自身产出信封，server 纯透传。
+    # caller/action/reason 三重 or 保底：getattr 默认值在属性显式置 None/空串时不生效
+    # （六审/七审踩过的坑：曾输出 "caller=None 无权 None" 与 "（）"）。
+    def envelope(self) -> dict[str, str]:
+        caller = getattr(self, "caller", None) or "?"
+        action = getattr(self, "action", None) or "access"
+        reason = getattr(self, "reason", None) or str(self) or "无明确原因"
+        return {"ok": False, "error": "FORBIDDEN",
+                "detail": f"caller={caller} 无权 {action}（{reason}）"}
+
 
 class CallerUnknown(CallerError):
     """caller 未注入（环境变量缺失或为空）→ fail-closed 拒绝。"""

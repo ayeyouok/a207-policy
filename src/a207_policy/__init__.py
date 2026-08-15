@@ -83,6 +83,7 @@ from .matrix import (
     resolve_access,
 )
 from .state import atomic_write_json, resolve_state_path
+from .errors import translate_error
 
 __all__ = [
     "__version__",
@@ -106,4 +107,5 @@ __all__ = [
     "NUTRITION_ASSESSMENT_CLINICAL_TOOLS", "NUTRITION_ASSESSMENT_CLINICAL_ROLES",
     "PERMISSION_MATRIX", "WRITE_TOOL_ALIASES", "WRITE_TOOL_POLICY",
     "normalize_mcp", "resolve_access", "resolve_state_path", "atomic_write_json",
+    "translate_error",
 ]

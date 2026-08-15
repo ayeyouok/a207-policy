@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
+os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏（2026-08-15）：测试进程显式确认 json 后端为开发模式
 import sys
 import tempfile
 import traceback
@@ -50,6 +51,7 @@ from a207_policy import (  # noqa: E402
     normalize_mcp,
     resolve_state_path,
     set_caller,
+    translate_error,
 )
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -193,6 +195,91 @@ def _ns_caller1_whitelist():
             raise AssertionError(f"未知身份 {bad!r} 未被拒绝（N-CALLER-1 白名单）")
     finally:
         _restore_env("A207_CALLER", prev)
+
+
+# --------------------------------------------------------- translate_error（2026-08-15）
+
+@check("translate_error：CallerError → FORBIDDEN envelope（policy 内生成，server 不感知 caller）")
+def _te_caller_forbidden():
+    import logging
+
+    lg = logging.getLogger("te-test")
+    env = translate_error(
+        PermissionDenied("hacker", "CKDNutri-care-mcp", "write", "no"), domain="P3", logger=lg)
+    assert env == {"ok": False, "error": "FORBIDDEN",
+                   "detail": "caller=hacker 无权 write（no）"}, env
+    env2 = translate_error(CallerUnknown("未注入"), domain="P3", logger=lg)
+    assert env2["ok"] is False and env2["error"] == "FORBIDDEN", env2
+    assert env2["detail"].startswith("caller=?"), env2  # CallerUnknown 无 caller 字段 → "?" 保底
+
+
+@check("translate_error：ValueError → INVALID_INPUT（detail 保留）")
+def _te_value_invalid():
+    import logging
+
+    lg = logging.getLogger("te-test")
+    env = translate_error(ValueError("energy_kcal 必须为有限数值"), domain="P2", logger=lg)
+    assert env == {"ok": False, "error": "INVALID_INPUT",
+                   "detail": "energy_kcal 必须为有限数值"}, env
+
+
+@check("translate_error：数据/环境错误 → INTERNAL_ERROR 且 detail 脱敏（不泄露路径）")
+def _te_data_masked():
+    import logging
+
+    lg = logging.getLogger("te-test")
+    env = translate_error(FileNotFoundError("/var/app/data/secret.json"), domain="P1", logger=lg)
+    assert env["ok"] is False and env["error"] == "INTERNAL_ERROR", env
+    assert "/var/app" not in env["detail"] and "P1_DATA" in env["detail"], env
+
+
+@check("translate_error：未知异常 → INTERNAL_ERROR + domain_UNKNOWN（脱敏）")
+def _te_unknown():
+    import logging
+
+    lg = logging.getLogger("te-test")
+    env = translate_error(AttributeError("module has no attr 'x'"), domain="P2", logger=lg)
+    assert env["ok"] is False and env["error"] == "INTERNAL_ERROR", env
+    assert "NUTR_UNKNOWN" in env["detail"] and "module has no" not in env["detail"], env
+
+
+@check("translate_error：content 语义——ValueError/KeyError 归数据错误，InvalidArgumentError 归 INVALID_INPUT")
+def _te_content_semantics():
+    import logging
+
+    class _InvalidArg(ValueError):
+        pass
+
+    lg = logging.getLogger("te-test")
+    env = translate_error(ValueError("rules.json 损坏"), domain="P5", logger=lg,
+                          extra_data_types=(KeyError,), value_error_to_invalid=False)
+    assert env["ok"] is False and env["error"] == "INTERNAL_ERROR" \
+        and "CONTENT_DATA" in env["detail"], env
+    env2 = translate_error(KeyError("meta"), domain="P5", logger=lg,
+                           extra_data_types=(KeyError,), value_error_to_invalid=False)
+    assert env2["error"] == "INTERNAL_ERROR" and "CONTENT_DATA" in env2["detail"], env2
+    env3 = translate_error(_InvalidArg("limit 非法"), domain="P5", logger=lg,
+                           extra_invalid_types=(_InvalidArg,), value_error_to_invalid=False)
+    assert env3 == {"ok": False, "error": "INVALID_INPUT", "detail": "limit 非法"}, env3
+
+
+@check("json 后端护栏：未显式 A207_ACCEPT_DEV_STORAGE=1 一律拒绝（防误部署生产）")
+def _te_json_backend_guard():
+    from a207_policy.storage import ACCEPT_DEV_STORAGE_ENV, ensure_json_backend_allowed
+
+    prev = os.environ.get(ACCEPT_DEV_STORAGE_ENV)
+    try:
+        os.environ.pop(ACCEPT_DEV_STORAGE_ENV, None)
+        try:
+            ensure_json_backend_allowed()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("json 后端未确认应拒绝（fail-closed）")
+        os.environ[ACCEPT_DEV_STORAGE_ENV] = "1"
+        ensure_json_backend_allowed()  # 显式确认放行
+    finally:
+        _restore_env(ACCEPT_DEV_STORAGE_ENV, prev)
 
 
 # --------------------------------------------------------- 矩阵完整性
