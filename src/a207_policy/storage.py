@@ -61,6 +61,11 @@ def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
 
     current 为存储层读回的原始属性列（列表字段是 JSON 字符串），new 为本次欲写的
     序列化列。合并后既保留并发写者的新增（列表合并），又体现本次修改（标量覆盖）。
+
+    契约（LOW-7，2026-08-15）：**list 语义列必须序列化为 JSON 数组字符串存储**——
+    合并逻辑仅当 cur_value 与 value 都是 str 且都解析为 list 时才走按 id 去重合并；
+    其余情况一律普通覆盖。业务层写入列表列时必须用 `json.dumps(list, ensure_ascii=False)`
+    而非 Python 原对象，否则乐观锁冲突重试时该列会被整值覆盖（丢并发新增）。
     """
     merged = dict(current)
     for key, value in new.items():
