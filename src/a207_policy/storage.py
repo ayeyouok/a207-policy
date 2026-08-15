@@ -220,16 +220,20 @@ class TablestoreBase:
 
     # ---- 全表 GetRange ----
 
-    def _range_all(self, table: str, pk_cols: list[str]) -> list[dict[str, Any]]:
-        """全表 GetRange（主键升序，每页 200 行翻到底）。
+    def _range_all(self, table: str, pk_cols: list[str],
+                   prefix: dict[str, str] | None = None) -> list[dict[str, Any]]:
+        """全表/按主键前缀 GetRange（主键升序，每页 200 行翻到底）。
 
         :param pk_cols: 表主键列名（有序），如 ["patient_id"] / ["patient_id", "sample_id"]。
+        :param prefix: 主键前缀固定值（LOW-4，2026-08-15）——如 {"patient_id": "P001"}
+          时只扫该患者行（复合主键前缀范围），不做全表 GetRange。缺省全表。
         返回 [{pk_dict, attrs_dict}]。
         """
         from tablestore import INF_MAX, INF_MIN
 
-        start = [(col, INF_MIN) for col in pk_cols]
-        end = [(col, INF_MAX) for col in pk_cols]
+        pre = prefix or {}
+        start = [(col, pre.get(col, INF_MIN)) for col in pk_cols]
+        end = [(col, pre.get(col, INF_MAX)) for col in pk_cols]
         rows: list[dict[str, Any]] = []
         next_start = start
         while next_start is not None:
