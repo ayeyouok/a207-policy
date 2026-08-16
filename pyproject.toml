@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a207-policy"
-version = "0.3.34"
+version = "0.3.35"
 description = "A207 统一身份注入 / 权限矩阵 / 状态路径策略包（Plan A 单一事实源）"
 requires-python = ">=3.10"
 readme = "README.md"

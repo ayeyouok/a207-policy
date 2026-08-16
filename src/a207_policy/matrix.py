@@ -137,6 +137,14 @@ CLINICIAN_ONLY_FIELDS: frozenset[str] = frozenset({
     # 原始量）仍家长可见，仅剥判读。
     "haz", "waz", "baz", "whz",
     "regimens", "clinical_notes", "pew_risk", "pew_rationale", "flags",
+    # L-1/M-1（2026-08-16，十一审）：F-1 修复**不完整**——P2 实际输出键
+    # rationale（PEW 判读理由，:901）、score（PEW 分值，:902/:1654）、
+    # growth_status_suggestion（生长判读建议，:1579）、warnings（临床警告，:606/1580）、
+    # caller（记录医生身份，:1659）均不在清单（清单只有 pew_rationale 无 rationale）
+    # → 家长报告/PEW 历史仍透出判读类数据与医生身份。补入。
+    # 注：care 依从性用 composite_score（非裸 score）、P1/P3 无裸 warnings/caller 键，
+    # 无家长可见字段被误伤（全仓核对）。
+    "rationale", "score", "growth_status_suggestion", "warnings", "caller",
 })
 
 # 上述字段「绝不可见」的角色（家庭助手）。M9 报告层据此做受限脱敏（OD-013）。
