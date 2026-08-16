@@ -133,6 +133,14 @@ def check_permission(caller: str, mcp: str, action: str = "read") -> dict:
 
 
 def _check_write_tool(caller_id: str, mcp_id: str, access: str, tool: str) -> dict:
+    # M1（2026-08-16，第七轮审查）：与 _enforce 同口径补退役工具 fail-closed——
+    # 此前 check_permission 路径漏 RETIRED_WRITE_TOOLS 检查（_enforce 有），双实现
+    # 漂移：退役写工具经 check_permission 会落到"未登记 → fail-closed 拒绝"（结果
+    # 相同但错误信息误导），统一为显式退役拦截。
+    for _ret in RETIRED_WRITE_TOOLS:
+        if _ret in (tool or "").strip().lower():
+            return _perm(False, access, "write",
+                         f"写工具 {_ret} 已退役（未实现/已下线），拒绝执行（M1）")
     policy = WRITE_TOOL_POLICY.get(tool)
     if policy is None:
         # P1-1 修复（2026-08-13）：未登记写工具 fail-closed 拒绝（此前按矩阵 R/W 放行
@@ -177,21 +185,44 @@ def _perm(allow: bool, access: str, resolved_action: str, reason: str, *,
 
 def enforce_read(mcp_name: str, tool: str | None = None) -> str:
     """入口守卫：caller 是否可读 mcp_name。放行返回 access（R/RL/RW），拒绝抛 PermissionDenied。
-    tool 参数预留用于未来细粒度读取工具级控制。
+
+    L1（2026-08-16，第七轮审查）：tool 形参此前被静默忽略（签名与行为不符）——当前
+    **读路径无工具级 ACL**（矩阵 MCP 粒度即可表达），tool 仅作未来扩展占位；显式
+    声明"忽略"而非静默，避免调用方误以为读工具受控。若 tool 提供仅用于日志审计。
     """
+    if tool:
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "enforce_read tool 参数当前忽略（读无工具级 ACL，MCP 粒度即可）：mcp=%s tool=%s",
+            mcp_name, tool)
     return _enforce(mcp_name, "read")
 
 
 def enforce_write(mcp_name: str, tool: str | None = None) -> str:
-    """入口守卫：caller 是否可写 mcp_name（tool 为写工具名时走 MX-3）。"""
+    """入口守卫：caller 是否可写 mcp_name（tool 为写工具名时走 MX-3）。
+
+    H1（2026-08-16，第七轮审查）：**tool 缺失时必须 fail-closed**——此前 tool=None
+    经 _enforce(mcp, "write") 的 `detect_write_tool("write")→None` 落入矩阵宽松分支
+    （只查 R/W），完全不触发 WRITE_TOOL_POLICY 收口：矩阵 R/W 域（如 care×parent、
+    care×risk_warning）下，任一写工具漏传 tool 即绕过 MX-3 工具级 ACL（如
+    schedule_followup 仅 doctor，家长/风险管线即可执行）。当前各调用点均传 tool（无
+    活跃利用），但库默认比工具级策略宽松是"脚枪"——修复：tool=None 显式拒绝并
+    提示传真实写工具名，杜绝"新增写工具漏传 tool 即越权"的未来回归。
+    """
+    if tool is None or not str(tool).strip():
+        raise PermissionDenied(
+            get_caller(), mcp_name, "(tool 缺失)",
+            "写入口必须显式传入写工具名（MX-3 工具级 ACL）；enforce_write 不接受"
+            "缺省 tool——缺省会退化为仅矩阵 R/W 校验、绕过 WRITE_TOOL_POLICY 收口"
+            "（H1 fail-closed）。若为读入口请用 enforce_read。")
     # P-B2 修复（2026-08-14）："read" 是动作保留字，不是写工具名——此前
     # enforce_write(mcp, "read") 会经 _enforce 的 `action != "read"` 判定静默降级为
     # **读检查**（写入口按读权限放行，语义反转）。显式 fail-closed 拒绝。
-    if tool is not None and str(tool).strip().lower() == "read":
+    if str(tool).strip().lower() == "read":
         raise PermissionDenied(
             get_caller(), mcp_name, tool,
             "'read' 是保留动作字，不是写工具名；enforce_write 不接受该值")
-    return _enforce(mcp_name, tool or "write")
+    return _enforce(mcp_name, tool)
 
 
 def enforce_nutrition_tool(caller: str, tool: str) -> str:
@@ -379,6 +410,11 @@ def verify_guardian_token(patient_id: str, guardian_token: str) -> bool:
     stored = entry.get("token", "")
     # 无 stored token（数据异常）也 fail-closed，不比对空串
     if not stored:
+        return False
+    # L2（2026-08-16，第七轮审查）：stored 非字符串（dict/list 等脏数据）→ 直接 False——
+    # 此前 compare_digest(stored, guardian_token) 对非字符串抛 TypeError → 家长读路径
+    # 500（实测复现）。fail-closed：脏存储不比对、不 500。
+    if not isinstance(stored, str):
         return False
     # P-B6 修复（2026-08-14）：guardian_token 非字符串（None/int/list）→ 直接 False——
     # 此前 compare_digest(stored, guardian_token or "") 对非字符串会抛 TypeError →

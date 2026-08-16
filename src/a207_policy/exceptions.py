@@ -53,6 +53,12 @@ try:
     CallerError = _global_policy.CallerError
     CallerUnknown = _global_policy.CallerUnknown
     PermissionDenied = _global_policy.PermissionDenied
-except Exception:
-    # 全局包不可用：保留本地副本（隔离部署时自洽）
+except (ImportError, AttributeError) as _exc:
+    # L2（2026-08-16，第七轮审查）：全局包不可用 → 保留本地副本（隔离部署自洽）；
+    # 仅捕获 ImportError/AttributeError（此前裸 except Exception 会把 ImportError
+    # 之外的任意异常静默吞掉，重定向脆弱——如 _global_policy 部分符号缺失时静默
+    # 用不完整副本）。异常类型显式 + warning 可观测。
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "a207_policy 全局包不可用（%s: %s），异常类回退本地副本", type(_exc).__name__, _exc)
     pass

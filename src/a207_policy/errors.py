@@ -62,7 +62,11 @@ def translate_error(
     :param extra_data_types: 归 INTERNAL_ERROR(数据) 的额外异常类型（如 content.KeyError）
     :param value_error_to_invalid: ValueError 是否归 INVALID_INPUT（content=False）
     """
-    cfg = DOMAIN_CONFIG[domain]
+    # L2（2026-08-16，第七轮审查）：domain 非法 → 此前 KeyError 冒泡（服务端 500
+    # 且日志无上下文）；fallback 到默认域配置（default_code 语义），不崩。
+    # L2（2026-08-16，第七轮审查）：domain 非法 → 此前 KeyError 冒泡（服务端 500
+    # 且日志无上下文）；fallback 到第一个域配置（同 data_code 语义），不崩。
+    cfg = DOMAIN_CONFIG.get(domain) or next(iter(DOMAIN_CONFIG.values()))
     ctx = "" if tool is None else f" tool={tool}"
     args_ctx = "" if not safe_args else f" args={safe_args}"
     if isinstance(exc, CallerError):
