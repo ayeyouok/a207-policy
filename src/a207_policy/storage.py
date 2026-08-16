@@ -24,6 +24,8 @@ import json
 import logging
 from typing import Any
 
+from .exceptions import ConflictError
+
 logger = logging.getLogger("a207-policy.storage")
 
 # 列表元素去重键的候选 id 键（并集：care 用 record_id/plan_id/notification_id/id/
@@ -234,7 +236,11 @@ class TablestoreBase:
                 if not is_conflict:
                     raise  # C-B4：SDK 错误（鉴权/表不存在等）立即抛，定位真实根因
                 last_err = exc  # 条件不满足 → 并发写冲突，重试
-        raise RuntimeError(
+        # 九审（2026-08-16）：乐观锁"重试仍失败"是**业务写冲突**（并发写者竞争），
+        # 非服务端内部故障——此前 RuntimeError 经 translate_error 归 INTERNAL_ERROR，
+        # 编排层无法区分"服务端坏了" vs "业务冲突（可重试/人工合并）"。
+        # 统一抛 ConflictError → translate_error 显式映射 CONFLICT 信封（三包共享）。
+        raise ConflictError(
             f"存储并发写冲突（{table} pk={pk}），重试 {self._MAX_RETRY} 次仍失败，"
             f"拒绝静默覆盖: {last_err}")
 

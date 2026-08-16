@@ -26,7 +26,7 @@ def _pkg_version() -> str:
 __version__ = _pkg_version()
 
 from .caller import as_caller, get_caller, set_caller
-from .exceptions import CallerError, CallerUnknown, PermissionDenied
+from .exceptions import CallerError, CallerUnknown, ConflictError, PermissionDenied
 from .gate import (
     _MATRIX_EXEMPT_WRITE_TOOLS,
     check_permission,
@@ -87,7 +87,7 @@ from .errors import translate_error
 
 __all__ = [
     "__version__",
-    "CallerError", "CallerUnknown", "as_caller", "get_caller", "set_caller",
+    "CallerError", "CallerUnknown", "ConflictError", "as_caller", "get_caller", "set_caller",
     "PermissionDenied", "check_permission", "detect_write_tool",
     "enforce_nutrition_tool", "enforce_read", "enforce_write", "is_write_action",
     "knowledge_profile", "validate_patient_id", "verify_guardian_token", "_MATRIX_EXEMPT_WRITE_TOOLS",

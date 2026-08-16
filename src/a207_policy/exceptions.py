@@ -47,12 +47,25 @@ class PermissionDenied(CallerError):
         super().__init__(f"DENIED {caller} -> {mcp}:{action} : {reason}")
 
 
+class ConflictError(Exception):
+    """业务写冲突（九审，2026-08-16）：跨包错误码统一——CONFLICT 此前仅
+    clinical-data 以信封形式定义；care/nutrition 同类写冲突（sample_id 撞键、
+    幂等重复、并发行冲突）抛 RuntimeError 冒泡到 server 被 translate_error 归
+    INTERNAL_ERROR，编排层无法区分"服务端坏了" vs "业务冲突（可换 id/重试）"。
+
+    各 repository/core 在确定性冲突处抛本异常（或捕获底层冲突转本异常），
+    translate_error 显式映射 {ok, error: "CONFLICT", detail}——三包统一，
+    编排层可据此给出"业务冲突"而非"内部错误"提示。
+    """
+
+
 try:
     import a207_policy as _global_policy  # 全局 a207_policy（若存在）
 
     CallerError = _global_policy.CallerError
     CallerUnknown = _global_policy.CallerUnknown
     PermissionDenied = _global_policy.PermissionDenied
+    ConflictError = _global_policy.ConflictError
 except (ImportError, AttributeError) as _exc:
     # L2（2026-08-16，第七轮审查）：全局包不可用 → 保留本地副本（隔离部署自洽）；
     # 仅捕获 ImportError/AttributeError（此前裸 except Exception 会把 ImportError

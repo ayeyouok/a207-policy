@@ -26,7 +26,7 @@ import json
 import logging
 from typing import Any
 
-from .exceptions import CallerError
+from .exceptions import CallerError, ConflictError
 
 # domain 主键（P1-P5 对齐权限矩阵）：服务名/脱敏 error_code 文案统一在此
 DOMAIN_CONFIG: dict[str, dict[str, str]] = {
@@ -73,6 +73,13 @@ def translate_error(
         # FORBIDDEN 信封由异常类生成（policy 内），server 不感知 caller
         logger.warning("[%s]鉴权拒绝:%s%s exc=%s", domain, ctx, args_ctx, exc)
         return exc.envelope()
+    if isinstance(exc, ConflictError):
+        # 九审（2026-08-16）：跨包错误码统一——CONFLICT 此前仅 clinical-data 以信封
+        # 定义；care/nutrition 同类写冲突（sample_id 撞键/幂等重复）抛 RuntimeError
+        # 被归 INTERNAL_ERROR，编排层无法区分"服务端坏了" vs "业务冲突（可重试）"。
+        # 现显式映射：detail 保留（业务冲突信息对调用方有明确语义，非内部路径泄漏）。
+        logger.info("[%s]业务写冲突:%s%s exc=%s", domain, ctx, args_ctx, exc)
+        return {"ok": False, "error": "CONFLICT", "detail": str(exc)}
     if isinstance(exc, extra_invalid_types):
         logger.info("[%s]入参错误（客户端）:%s%s exc=%s", domain, ctx, args_ctx, exc)
         return {"ok": False, "error": "INVALID_INPUT", "detail": str(exc)}
