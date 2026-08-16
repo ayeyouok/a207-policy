@@ -28,9 +28,12 @@ from .exceptions import ConflictError
 
 logger = logging.getLogger("a207-policy.storage")
 
-# 列表元素去重键的候选 id 键（并集：care 用 record_id/plan_id/notification_id/id/
-# entry_id，nutrition 另含 date 回退——并集后 care 元素均有业务 id 键，date 不抢先）
-_ITEM_ID_KEYS = ("record_id", "plan_id", "notification_id", "id", "entry_id", "date")
+# 列表元素去重键的候选 id 键（care 用 record_id/plan_id/notification_id/id/entry_id）。
+# B3-1（2026-08-16，十审）：**删 "date"**——date 不是身份键，任何缺真实 id 键的
+# 列表元素会按"天"合并，同日两条无 id 元素被静默并成一条（实测 {food:rice} +
+# {food:apple} 同日 → rice 被销毁）。删后无 id 键元素走 :42 JSON 全等兜底
+# （_item_key 已有该分支），语义正确：仅内容全等才判重、不同内容各自保留。
+_ITEM_ID_KEYS = ("record_id", "plan_id", "notification_id", "id", "entry_id")
 
 
 def _item_key(item: Any) -> tuple:
@@ -206,7 +209,13 @@ class TablestoreBase:
         from tablestore import OTSClientError
 
         last_err: Exception | None = None
-        for _ in range(self._MAX_RETRY):
+        # B1-2（2026-08-16，十审）：历史行补列不消耗重试预算——此前补列后
+        # `continue` 消耗一次循环配额，某行始终缺 _REV_COL 时 3 次重试全耗在
+        # 补列上，最终抛 ConflictError 且 last_err=None（误导性"并发写冲突"）。
+        # 补列成功即进入正常 CAS；用 while 循环保证"至少一次 CAS 尝试"——
+        # 补列本身幂等（force=True），重复补列无害。
+        attempts = 0
+        while attempts < self._MAX_RETRY:
             current = self._get_row(table, pk)
             rev = int(current.get(self._REV_COL, 0)) if current else 0
             next_attrs = dict(attrs)
@@ -216,7 +225,7 @@ class TablestoreBase:
                 # 落库）——条件 `_REV_COL == 0` 对缺列恒不满足（列不存在 ≠ 等于 0），
                 # 首次更新 3 次重试后 INTERNAL_ERROR 且无自动修复路径。先**无条件
                 # 补列初始化**（force：仅行存在性期望，幂等无害），下一轮走正常
-                # 条件更新。
+                # 条件更新。B1-2：补列不占 attempts（不消耗 CAS 重试预算）。
                 if self._REV_COL not in current:
                     legacy = dict(next_attrs)
                     legacy[self._REV_COL] = 0
@@ -224,6 +233,7 @@ class TablestoreBase:
                         table, pk, legacy, rev=0, expect_exists=True, force=True)
                     continue
             next_attrs[self._REV_COL] = rev + 1
+            attempts += 1  # 仅正常 CAS 尝试消耗预算（补列不占）
             try:
                 self._put_row_conditioned(
                     table, pk, next_attrs, rev, expect_exists=current is not None)
@@ -285,14 +295,15 @@ class TablestoreBase:
         :param specs: {table_name: [(pk_col, "STRING"), ...]}——主键 schema 单一事实源
         留在各包 repository（表名/主键是各域数据契约，不并入本模块）。
         """
-        from tablestore import (CapacityUnit, OTSClient,
+        from tablestore import (CapacityUnit,
                                 ReservedThroughput, TableMeta, TableOptions)
 
-        endpoint = _os_getenv(self.OTS_ENDPOINT_ENV)
-        instance = _os_getenv(self.OTS_INSTANCE_ENV)
-        ak = _os_getenv(self.OTS_AK_ID_ENV)
-        sk = _os_getenv(self.OTS_AK_SECRET_ENV)
-        client = OTSClient(endpoint, ak, sk, instance)
+        # B5-1（2026-08-16，十审）：复用 _get_client()——此前这里重建第二个
+        # OTSClient（endpoint/ak/sk/instance 从环境变量取），忽略测试注入的
+        # Fake 客户端：测试中 ensure_tables 打真实 Tablestore（无参数即 fail、
+        # 有参数则真建表），与注入的 Fake 完全脱节。统一走 _get_client()
+        # （含 _client 注入点），幂等建表对 Fake 与真实客户端同路径。
+        client = self._get_client()
         existing = set(client.list_table())
 
         for table_name, pk_schema in specs.items():

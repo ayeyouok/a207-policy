@@ -14,6 +14,9 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from typing import Any  # 十审（2026-08-16）：此前未导入，validate_patient_id 的
+# patient_id: Any 靠 `from __future__ import annotations` 惰性字符串——运行时无碍
+# 但 typing.get_type_hints / Pydantic schema 内省抛 NameError。补导入。
 
 from .caller import get_caller
 from .exceptions import PermissionDenied

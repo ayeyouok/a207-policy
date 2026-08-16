@@ -300,16 +300,13 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "requires_confirmation": False,
         "note": "BUG-46：标记通知升级（escalated 独立布尔，与 workflow_status 正交）；G1 修复：risk_warning=HAIP 24h 自动升级身份",
     },
-    # #10（2026-08-15）：补登记家长写操作——ack_notification 此前不在
-    # WRITE_TOOL_POLICY，detect_write_tool 识别不到 → 回退矩阵 care×parent 的
-    # R/W 标签放行（无越权，但违反"写工具必须显式登记"不变量，且与
-    # upsert_food_diary 等家长写工具登记口径不一致）。登记后通用闸门统一管辖。
-    "ack_notification": {
-        "mcp": "CKDNutri-care-mcp",
-        "allowed": frozenset({"parent_assistant", "doctor_assistant"}),
-        "requires_confirmation": False,
-        "note": "家长/医生确认通知已读（幂等，置 status=acked 不推进闭环；需求 §5.2）",
-    },
+    # A1-1（2026-08-16，十审）：**删除 ack_notification 登记**——此前登记是装饰性的：
+    # ack 执行走读权闸门（care core.py:996-1002 有意设计：所有 P3 读角色均可标记已读，
+    # 家长另受 guardian_token 绑定），登记从不触发 enforce_write，不执行任何强制，
+    # 却让人误以为受 MX-3 写权收口。删除后若未来误用 enforce_write(care,
+    # "ack_notification") 会因未登记 fail-closed 拒绝（逼开发者显式重新登记并审视
+    # risk_warning 权限），比"装饰性登记掩盖无强制"更安全。矩阵 care×parent=RW
+    # 保留（家长写操作口径，与 upsert_food_diary 一致）。
     # #10（2026-08-15）：补登记 issue_guardian_token——P1 写操作（签发/轮换令牌），
     # 此前依赖 his.py 内 GUARDIAN_ISSUERS 兜底（仅 doctor），通用闸门不感知。
     "issue_guardian_token": {

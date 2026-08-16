@@ -44,6 +44,16 @@ def resolve_state_path(filename: str, *, base: str | None = None) -> Path:
         else:
             # 未设环境变量：落到系统临时目录，保证可写（避免只读安装目录崩溃）
             root = Path(tempfile.gettempdir()) / "a207_state"
+    # B2-1（2026-08-16，十审）：基准目录与包安装目录比对——此前仅 filename 防护，
+    # base/A207_DATA_DIR 从不与安装目录比对；一旦误配指向包目录（site-packages/
+    # src 下的 a207-policy 或其子目录），状态文件会写进安装目录（docstring 明确
+    # 要防的场景：只读/容器重启丢数据）。fail-closed：配置错误拒绝而非静默污染。
+    _installed = Path(__file__).resolve().parent.parent  # 包安装根（site-packages/a207-policy 或 src/a207-policy）
+    _root_resolved = root.resolve()
+    if _root_resolved == _installed or _installed in _root_resolved.parents:
+        raise ValueError(
+            f"状态目录 {root} 指向包安装目录（{_installed}）——状态文件会写进"
+            "安装目录（只读/重启丢数据），请改配 A207_DATA_DIR 到可写数据目录")
     root.mkdir(parents=True, exist_ok=True)
     return root / filename
 
