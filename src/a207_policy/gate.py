@@ -37,7 +37,7 @@ from .state import resolve_state_path
 
 _ALIASES = WRITE_TOOL_ALIASES  # 别名引用，保持 detect_write_tool 可读
 
-_NOTIFY_RE = re.compile(r"notify_[a-z_]+")
+_NOTIFY_RE = re.compile(r"(?<![a-z0-9_])notify_[a-z_]+")
 _UNDERSCORE_PREFIXES = tuple(p for p in (
     "write", "create", "update", "delete", "insert",
     "upsert_", "notify_", "log_", "award_", "push_", "trigger_",
@@ -75,16 +75,29 @@ _MATRIX_EXEMPT_WRITE_TOOLS: frozenset[str] = frozenset(
     {"upsert_food_diary"})
 
 
+def _word_match(word: str, text: str) -> bool:
+    """词边界子串匹配：word 须作为独立词出现（前/后不是 [a-z0-9_]）。
+
+    八审（2026-08-16）：此前 detect_write_tool 用 `tool in lowered` 纯子串匹配，
+    无词边界——denotify_physician 内含 notify_physician 子串（de+notify_physician）
+    被误判为写工具 notify_physician → 走 MX-3 收口拒绝（把合法读工具当写工具拒绝）。
+    词边界断言（前后非字母/数字/下划线）保证 snake_case 工具名独立成词才命中。
+    """
+    if not word:
+        return False
+    return re.search(r"(?<![a-z0-9_])" + re.escape(word) + r"(?![a-z0-9_])", text) is not None
+
+
 def detect_write_tool(text: str) -> str | None:
     """从 intent/action 文本中识别已登记的写工具，识别不到返回 None。"""
     lowered = (text or "").strip().lower()
     if not lowered:
         return None
     for tool in sorted(WRITE_TOOL_POLICY, key=len, reverse=True):
-        if tool in lowered:
+        if _word_match(tool, lowered):
             return tool
     for alias, tool in sorted(_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True):
-        if alias in lowered:
+        if _word_match(alias, lowered):
             return tool
     if _NOTIFY_RE.search(lowered):
         # 2026-08-13（policy 审查）说明：未登记 notify_xxx 收口到 notify_physician 是
@@ -109,6 +122,25 @@ def is_write_action(action: str) -> bool:
     return any(hint in lowered for hint in ("写入", "写回", "新增一条", "保存到", "提交写"))
 
 
+def _retired_tool(action: str) -> str | None:
+    """词边界匹配退役写工具名（push_to_emr / 写回病历 / 写入病历 / 推送病历）。
+
+    八审（2026-08-16）：M1 声称的"消除漂移"不实——退役检查写在 _check_write_tool
+    内部，而 check_permission 只有 detect_write_tool 命中才进 _check_write_tool；
+    退役名不在 WRITE_TOOL_POLICY/别名 → detect 永远返回 None → 退役检查对真实
+    退役名**不可达（死代码）** → check_permission（路由层）落到矩阵 R/W 放行，
+    与 enforce_write（写入口守卫，_enforce 内联检查）结论相反（21 个可枚举元组
+    全在"路由更宽松"方向）。现提升为共享判定，check_permission / _enforce 同口径。
+    """
+    if not action:
+        return None
+    lowered = (action or "").strip().lower()
+    for _ret in sorted(RETIRED_WRITE_TOOLS, key=len, reverse=True):
+        if _word_match(_ret, lowered):
+            return _ret
+    return None
+
+
 def check_permission(caller: str, mcp: str, action: str = "read") -> dict:
     """M13 兼容查表：返回 {allow, access, resolved_action, reason, ...}。"""
     caller_id = (caller or "").strip()
@@ -121,6 +153,13 @@ def check_permission(caller: str, mcp: str, action: str = "read") -> dict:
         return _perm(False, "-", "read", f"mcp={mcp or '(空)'} 不在 5 个已登记 MCP 内")
 
     access = PERMISSION_MATRIX[mcp_id][caller_id]
+    # 八审（2026-08-16）：退役工具 fail-closed 前置到路由层顶层——与 enforce_write
+    # 同口径（此前仅 _enforce 内联检查，check_permission 因 detect_write_tool 对退役名
+    # 返回 None 永不进入 _check_write_tool，退役检查死代码，路由层放行退役工具）。
+    _ret = _retired_tool(action_id)
+    if _ret:
+        return _perm(False, access, "write",
+                     f"写工具 {_ret} 已退役（未实现/已下线），拒绝执行（M1）")
     tool = detect_write_tool(action_id)
     if tool:
         return _check_write_tool(caller_id, mcp_id, access, tool)
@@ -133,14 +172,9 @@ def check_permission(caller: str, mcp: str, action: str = "read") -> dict:
 
 
 def _check_write_tool(caller_id: str, mcp_id: str, access: str, tool: str) -> dict:
-    # M1（2026-08-16，第七轮审查）：与 _enforce 同口径补退役工具 fail-closed——
-    # 此前 check_permission 路径漏 RETIRED_WRITE_TOOLS 检查（_enforce 有），双实现
-    # 漂移：退役写工具经 check_permission 会落到"未登记 → fail-closed 拒绝"（结果
-    # 相同但错误信息误导），统一为显式退役拦截。
-    for _ret in RETIRED_WRITE_TOOLS:
-        if _ret in (tool or "").strip().lower():
-            return _perm(False, access, "write",
-                         f"写工具 {_ret} 已退役（未实现/已下线），拒绝执行（M1）")
+    # 八审（2026-08-16）：退役拦截已提升至 check_permission 顶层 _retired_tool()
+    # （本函数仅由 detect_write_tool 命中时调用，而退役名不在 WRITE_TOOL_POLICY/
+    # 别名 → detect 返回 None → 此前的退役检查对本函数**不可达死代码**）。
     policy = WRITE_TOOL_POLICY.get(tool)
     if policy is None:
         # P1-1 修复（2026-08-13）：未登记写工具 fail-closed 拒绝（此前按矩阵 R/W 放行
@@ -292,13 +326,13 @@ def _enforce(mcp_name: str, action: str) -> str:
     # P-B3 修复（2026-08-14）：退役写工具 fail-closed——push_to_emr 等已删登记但
     # 中文别名曾保留（中英文结论相反）；现在别名已删 + 此处拦截英文名直传（否则
     # detect_write_tool 未命中会回退矩阵 R/W 放行幽灵工具）。
+    # 八审（2026-08-16）：统一走 _retired_tool()（与 check_permission 同口径）。
     if action != "read":
-        _act_low = (action or "").strip().lower()
-        for _ret in RETIRED_WRITE_TOOLS:
-            if _ret in _act_low:
-                raise PermissionDenied(
-                    caller, mcp, action,
-                    f"写工具 {_ret} 已退役（未实现/已下线），拒绝执行")
+        _ret = _retired_tool(action)
+        if _ret:
+            raise PermissionDenied(
+                caller, mcp, action,
+                f"写工具 {_ret} 已退役（未实现/已下线），拒绝执行")
     if wt:
         policy = WRITE_TOOL_POLICY.get(wt)
         if policy is None:
