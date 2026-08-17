@@ -55,10 +55,29 @@ from a207_policy import (  # noqa: E402
 )
 
 RESULTS: list[tuple[str, bool, str]] = []
+# 十二审（2026-08-17）：@check 注册的用例函数（直跑 main() 统一执行）。
+# 此前 check 装饰器在 **import 时立即执行** fn()——pytest 收集 test_* 后再次执行
+# 造成双执行（有状态副作用用例第二次失败）。改为**延迟执行**：check 只注册，
+# 直跑 main() 循环执行全部；pytest 收集 test_* 各执行一次。两种模式各只跑一次。
+CHECK_FNS: list[tuple[str, Any]] = []
 
 
 def check(name: str):
     def deco(fn):
+        CHECK_FNS.append((name, fn))
+        # 十二审（2026-08-17）：pytest 收集（CI 假绿阻断修复）——把 @check 函数以
+        # test_ 前缀注册到**调用模块**全局，pytest 即可收集为测试用例。
+        frame = sys._getframe(1)
+        _test_name = f"test_{fn.__name__.lstrip('_')}"
+        frame.f_globals[_test_name] = fn
+        return fn
+
+    return deco
+
+
+def _run_checks() -> int:
+    """直跑模式：统一执行全部 @check 用例，返回失败数。"""
+    for name, fn in CHECK_FNS:
         try:
             fn()
             RESULTS.append((name, True, ""))
@@ -66,9 +85,7 @@ def check(name: str):
             RESULTS.append((name, False, str(exc) or "断言失败"))
         except Exception:  # noqa: BLE001
             RESULTS.append((name, False, traceback.format_exc(limit=3)))
-        return fn
-
-    return deco
+    return sum(1 for _, ok, _ in RESULTS if not ok)
 
 
 def _reset(caller: str = "doctor_assistant") -> None:
@@ -678,6 +695,8 @@ def _p1_parent_hidden_fields_coverage():
 
 
 def main() -> int:
+    # 十二审：直跑模式先统一执行全部 @check（此前在 import 时立即执行）
+    _run_checks()
     for name, ok, msg in RESULTS:
         print(f"[{'PASS' if ok else 'FAIL'}] {name}")
         if not ok:
