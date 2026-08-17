@@ -426,8 +426,8 @@ def _nutrition_write_derived():
     )
     assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == _matrix_writers("CKDNutri-nutrition-mcp"), \
         "写白名单未与矩阵保持一致"
-    assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == frozenset({"parent_assistant", "doctor_assistant"}), \
-        f"营养写白名单={NUTRITION_ASSESSMENT_WRITE_ALLOWED}，期望 {{parent_assistant, doctor_assistant}}（需求 2026-08-12：临床可代录日记）"
+    assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == frozenset({"parent_assistant", "doctor_assistant", "demo_parent_assistant"}), \
+        f"营养写白名单={NUTRITION_ASSESSMENT_WRITE_ALLOWED}，期望 {{parent_assistant, doctor_assistant, demo_parent_assistant}}（需求 2026-08-12：临床可代录日记；2026-08-17：演示家长等价家长）"
 
 
 @check("LIS 写白名单由矩阵派生；FOLLOWUP 强制收口为仅医生（有意识不派生，防 risk 误写随访落盘）；NOTIFY 写白名单由矩阵派生——三个集合并存且均为确定性")
@@ -640,6 +640,153 @@ def _knowledge_profiles():
 def _knowledge_unknown_not_full():
     got = knowledge_profile("some_unknown_agent")
     assert got != "full", f"未知角色拿到全量专业语料：{got!r}"
+
+
+# --------------------------------------------------------- 2026-08-17：演示家长 demo_parent_assistant 回归
+
+@check("演示家长 demo_parent_assistant 已登记为合法 caller（get_caller 白名单）")
+def _demo_registered_caller():
+    from a207_policy.matrix import CALLERS, DEMO_PARENT_ROLE
+    assert DEMO_PARENT_ROLE in CALLERS, "demo_parent_assistant 未进入 CALLERS（get_caller 会拒）"
+
+
+@check("演示家长属于 PARENT_EQUIVALENT_ROLES（家长视图/家长级放行判定集合）")
+def _demo_in_equivalent_roles():
+    from a207_policy.matrix import PARENT_EQUIVALENT_ROLES, DEMO_PARENT_ROLE, PARENT_ROLE
+    assert DEMO_PARENT_ROLE in PARENT_EQUIVALENT_ROLES
+    assert PARENT_ROLE in PARENT_EQUIVALENT_ROLES
+    # 仅家长等价两类，不含临床/风险
+    assert PARENT_EQUIVALENT_ROLES == frozenset({"parent_assistant", "demo_parent_assistant"})
+
+
+@check("演示家长权限=家长：读临床数据 RL 放行、读评估域 NONE 拒绝（与 parent 一致）")
+def _demo_read_scope():
+    from a207_policy.matrix import DEMO_PARENT_ROLE
+    with as_caller(DEMO_PARENT_ROLE):
+        enforce_read("CKDNutri-clinical-data-mcp")      # RL → 放行
+        try:
+            enforce_read("CKDNutri-assessment-mcp")     # NONE → 拒绝
+        except PermissionDenied:
+            pass
+        else:
+            raise AssertionError("演示家长竟能读评估域（应与家长一致拒绝）")
+
+
+@check("演示家长与家长的读权完全一致（各 MCP 矩阵取值相等）")
+def _demo_matches_parent_matrix():
+    from a207_policy.matrix import PERMISSION_MATRIX, DEMO_PARENT_ROLE, PARENT_ROLE
+    for mcp, row in PERMISSION_MATRIX.items():
+        assert row[DEMO_PARENT_ROLE] == row[PARENT_ROLE], \
+            f"{mcp}：demo({row[DEMO_PARENT_ROLE]}) 与家长({row[PARENT_ROLE]}) 不一致"
+
+
+@check("演示家长写饮食日记放行（enforce_write upsert_food_diary，家长等价）")
+def _demo_write_diary():
+    from a207_policy.matrix import DEMO_PARENT_ROLE
+    with as_caller(DEMO_PARENT_ROLE):
+        enforce_write("CKDNutri-nutrition-mcp", tool="upsert_food_diary")
+
+
+@check("演示家长不可写化验（clinical-data×demo=RL，与 parent 一致）")
+def _demo_no_lab_write():
+    from a207_policy.matrix import DEMO_PARENT_ROLE
+    with as_caller(DEMO_PARENT_ROLE):
+        try:
+            enforce_write("CKDNutri-clinical-data-mcp", tool="upsert_lab_result")
+        except PermissionDenied:
+            return
+        raise AssertionError("演示家长竟能写化验")
+
+
+@check("演示家长在临床判读字段「绝不可见」集合内（P5 报告层据此剥除，与 parent 一致）")
+def _demo_clinician_hidden():
+    from a207_policy.matrix import CLINICIAN_ONLY_HIDDEN_FROM, DEMO_PARENT_ROLE, PARENT_ROLE
+    assert DEMO_PARENT_ROLE in CLINICIAN_ONLY_HIDDEN_FROM
+    assert PARENT_ROLE in CLINICIAN_ONLY_HIDDEN_FROM
+
+
+@check("演示家长语料分级=plain_language（与 parent 一致，通俗语料）")
+def _demo_knowledge_profile():
+    from a207_policy.matrix import KNOWLEDGE_PROFILE, DEMO_PARENT_ROLE
+    assert KNOWLEDGE_PROFILE[DEMO_PARENT_ROLE] == "plain_language"
+
+
+@check("演示家长不在临床/风险专属写集合（LIS 写权仅 doctor；令牌闸对其自动免绑定）")
+def _demo_not_clinician_write():
+    from a207_policy.matrix import LIS_WRITE_ALLOWED, DEMO_PARENT_ROLE
+    assert DEMO_PARENT_ROLE not in LIS_WRITE_ALLOWED, "演示家长不应获得化验写权"
+
+
+@check("演示家长 P1 受限视图：his._scope_of 返回 limited_parent（与 parent 一致，临床判读被剥除）")
+def _demo_p1_limited_scope():
+    # 端到端确认：P1 的 _scope_of 已切换为 `caller in PARENT_EQUIVALENT_ROLES`，
+    # demo 落入 limited_parent 分支 → 上层 _strip_parent_sensitive 剥除 P1_PARENT_HIDDEN_FIELDS。
+    import importlib.util
+    import sys
+    from pathlib import Path as _P
+    clinical_src = _P(__file__).resolve().parents[2] / "CKDNutri-clinical-data-mcp" / "src"
+    if str(clinical_src) not in sys.path:
+        sys.path.insert(0, str(clinical_src))
+    spec = importlib.util.spec_from_file_location(
+        "a207_demo_probe_his",
+        clinical_src / "CKDNutri_clinical_data_mcp" / "his.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001
+        raise AssertionError(f"无法导入 clinical-data his 模块以端到端验证：{exc}")
+    assert mod._scope_of("demo_parent_assistant") == "limited_parent", \
+        "演示家长未获得 P1 受限家长视图"
+    assert mod._scope_of("parent_assistant") == "limited_parent"
+
+
+@check("演示家长 get_patient_profile 端到端：data_scope=limited_parent 且临床判读字段被剥除（免令牌）")
+def _demo_p1_profile_stripped():
+    # 端到端确认 demo 走家长受限视图：_scope_of→limited_parent → _strip_parent_sensitive
+    # 剥除 P1_PARENT_HIDDEN_FIELDS（biochemistry/food_diary_5d/...）与 CLINICIAN_ONLY_FIELDS
+    # （z_score_height/stage_confirmed_by/clinician_note 等）。demo 免令牌（_guard_guardian 短路）。
+    import importlib.util
+    import sys
+    import tempfile as _tf
+    from pathlib import Path as _P
+    clinical_src = _P(__file__).resolve().parents[2] / "CKDNutri-clinical-data-mcp" / "src"
+    pkg_dir = clinical_src / "CKDNutri_clinical_data_mcp"
+    # 以正式子模块方式加载 his（使其 `from .repository import` 相对导入可解析）
+    if "CKDNutri_clinical_data_mcp" not in sys.modules:
+        pkg_spec = importlib.util.spec_from_file_location(
+            "CKDNutri_clinical_data_mcp", pkg_dir / "__init__.py")
+        pkg_mod = importlib.util.module_from_spec(pkg_spec)
+        sys.modules["CKDNutri_clinical_data_mcp"] = pkg_mod
+        pkg_spec.loader.exec_module(pkg_mod)
+    spec = importlib.util.spec_from_file_location(
+        "CKDNutri_clinical_data_mcp.his", pkg_dir / "his.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["CKDNutri_clinical_data_mcp.his"] = mod
+    spec.loader.exec_module(mod)
+
+    prev_backend = os.environ.get("A207_STORAGE_BACKEND")
+    prev_token_dir = os.environ.get("A207_GUARDIAN_TOKEN_DIR")
+    tmp = _tf.mkdtemp(prefix="a207-demo-profile-")
+    try:
+        os.environ["A207_STORAGE_BACKEND"] = "json"          # 免 OTS，读包内 patients.json
+        os.environ["A207_GUARDIAN_TOKEN_DIR"] = tmp          # 令牌库隔离
+        with as_caller("demo_parent_assistant"):
+            r = mod.get_patient_profile("P0001", None)        # demo 免令牌绑定
+        assert r.get("ok") is True, f"demo get_patient_profile 失败：{r}"
+        data = r.get("data", {})
+        assert data.get("data_scope") == "limited_parent", \
+            f"demo 未获得受限家长视图：data_scope={data.get('data_scope')}"
+        # 临床判读聚合块与叶子键必须被剥除（与 parent 视图一致）
+        for blocked in ("biochemistry", "food_diary_5d", "dialysis_detail",
+                        "medical_record_no", "bsa_m2", "z_score_height",
+                        "stage_confirmed_by", "clinician_note", "doctor_note"):
+            assert blocked not in data, f"demo 视图竟含临床判读字段 {blocked!r}"
+        # nutrition_ceiling 是家长可见例外（医生设定摄入上限），必须保留
+        assert "nutrition_ceiling" in data, "nutrition_ceiling 家长例外被误剥"
+    finally:
+        _restore_env("A207_STORAGE_BACKEND", prev_backend)
+        _restore_env("A207_GUARDIAN_TOKEN_DIR", prev_token_dir)
 
 
 # --------------------------------------------------------- P1-3 状态外置

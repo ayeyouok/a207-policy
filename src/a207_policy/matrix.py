@@ -19,9 +19,20 @@ from typing import Mapping, TypedDict, cast
 # （此前 care/clinical-data/nutrition 共 6 处硬编码，与 CALLERS 双处维护漂移风险）。
 PARENT_ROLE: str = "parent_assistant"
 
+# 演示身份（2026-08-17）：家长等价、免 guardian_token 绑定——用于现场演示家长侧效果，
+# 免去每次演示都要绑定一次令牌的麻烦。权限与视图与家长完全一致（同属 PARENT_EQUIVALENT_ROLES），
+# 但令牌闸（his._guard_guardian / nutrition._guard_guardian 等的 `caller != PARENT_ROLE`
+# 短路）对其自动放行（免绑定）。安全红线：仅限演示/沙箱数据集，绝不可指向真实患儿库、不上生产。
+DEMO_PARENT_ROLE: str = "demo_parent_assistant"
+# 家长级等价身份集合：家长 + 演示家长。所有"家长视图/家长级放行"判断应判
+# `caller in PARENT_EQUIVALENT_ROLES`，而非 `caller == PARENT_ROLE`，使新增家长等价
+# 身份零成本扩展（P1 his._scope_of / core.get_critical_values / core.get_lab_trend 已切换）。
+PARENT_EQUIVALENT_ROLES: frozenset[str] = frozenset({PARENT_ROLE, DEMO_PARENT_ROLE})
+
 CALLERS: tuple[str, ...] = (
     "doctor_assistant",
     "parent_assistant",
+    "demo_parent_assistant",     # 演示身份（家长等价、免令牌绑定，仅演示/沙箱）
     "risk_warning",             # 管线身份（非 Agent，仅 WRITE_TOOL_POLICY notify_* / 风险管线）
 )
 
@@ -113,8 +124,8 @@ def normalize_mcp(name: str) -> str:
     return ""  # 未知名返回空串（严格 fail-closed，契约见 docstring）
 
 
-# MX-1：分期类问题不由家庭助手判定，改读 M1 已确诊分期
-MX1_BLOCKED_CALLERS: frozenset[str] = frozenset({"parent_assistant"})
+# MX-1：分期类问题不由家庭助手判定，改读 M1 已确诊分期（演示家长同家长口径）
+MX1_BLOCKED_CALLERS: frozenset[str] = frozenset({"parent_assistant", "demo_parent_assistant"})
 
 # ---------------------------------------------------------------- MX-1 字段可见性边界
 # P0-4/P0-5/P1-4 统一修复（2026-08-13）：CLINICIAN_ONLY_FIELDS 重定义为**临床判读字段**
@@ -147,8 +158,9 @@ CLINICIAN_ONLY_FIELDS: frozenset[str] = frozenset({
     "rationale", "score", "growth_status_suggestion", "warnings", "caller",
 })
 
-# 上述字段「绝不可见」的角色（家庭助手）。M9 报告层据此做受限脱敏（OD-013）。
-CLINICIAN_ONLY_HIDDEN_FROM: frozenset[str] = frozenset({"parent_assistant"})
+# 上述字段「绝不可见」的角色（家庭助手 + 演示家长，二者家长级视图一致）。
+# M9 报告层据此做受限脱敏（OD-013）。
+CLINICIAN_ONLY_HIDDEN_FROM: frozenset[str] = frozenset({"parent_assistant", "demo_parent_assistant"})
 
 # ---------------------------------------------------------------- 权限矩阵（v2.3 阶段 0：3 角色 × 5 MCP，CKDNutri P1–P5）
 
@@ -163,18 +175,22 @@ _PERMISSION_MATRIX: dict[str, dict[str, str]] = {
     "CKDNutri-clinical-data-mcp": {
         # doctor=R/W：临床助手可读写患儿档案与化验
         # parent=RL：家庭助手仅受限视图（脱敏）
+        # demo=RL：演示家长，家长等价视图、免令牌绑定（2026-08-17）
         # risk=R：风险引擎读分期/化验
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_LIMITED,
+        "demo_parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
     "CKDNutri-nutrition-mcp": {
         # doctor=R/W：临床角色读营养数据 + 跑计算面工具（CLINICAL_ROLES 单独收口）
         #   + 按需求 P2 工具表（临床=✔）可写饮食日记 upsert_food_diary（2026-08-12 需求对齐）
         # parent=R/W：写饮食日记(upsert_food_diary) 且需回读日记摘要 —— 与 WRITE_TOOL_POLICY 一致
+        # demo=R/W：演示家长等价（含写日记，免令牌）
         # risk=-：风险引擎不读营养域
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_RW,
+        "demo_parent_assistant": ACCESS_RW,
         "risk_warning": ACCESS_NONE,
     },
     "CKDNutri-care-mcp": {
@@ -183,25 +199,31 @@ _PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         # 是家长写操作，需求 §5.2；与 upsert_food_diary 家长写口径一致）——此前
         # parent=R，ack_notification 未登记 WRITE_TOOL_POLICY 时回退矩阵 R 放行
         # 属"漏登记侥幸通过"，登记后矩阵必须同步为 RW 否则断言矛盾。
+        # demo=R/W：演示家长等价（读通知 + 确认已读，免令牌）
         # risk=R/W：管线身份写通知（notify_* 系列由 WRITE_TOOL_POLICY 钳制为 {risk_warning}）
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_RW,
+        "demo_parent_assistant": ACCESS_RW,
         "risk_warning": ACCESS_RW,
     },
     "CKDNutri-assessment-mcp": {
         # doctor=R：读 eGFR / 分期
         # parent=-：分期类问题由家庭助手读 M1 已确诊分期（MX-1），不暴露评估域
+        # demo=-：演示家长同家长口径（MX-1 同样拦截，读 M1 已确诊分期）
         # risk=R：风险引擎读分期
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_NONE,
+        "demo_parent_assistant": ACCESS_NONE,
         "risk_warning": ACCESS_READ,
     },
     "CKDNutri-content-mcp": {
         # doctor=R/W：报告生成 + push_to_emr 需 R/W 回查
         # parent=RL：受限报告视图
+        # demo=RL：演示家长等价受限报告视图（CLINICIAN_ONLY_HIDDEN_FROM 含 demo）
         # risk=R：风险引擎读报告上下文
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_LIMITED,
+        "demo_parent_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
 }
@@ -214,6 +236,7 @@ KNOWLEDGE_PROFILE: dict[str, str] = {
     "doctor_assistant": "full",
     "risk_warning": "full",
     "parent_assistant": "plain_language",
+    "demo_parent_assistant": "plain_language",   # 演示家长：家长级通俗语料
 }
 
 # ---------------------------------------------------------------- MX-3 写权（v2.3 阶段 0：删 M11 两条 + 清理退役角色）
@@ -236,10 +259,11 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
     "upsert_food_diary": {
         "mcp": "CKDNutri-nutrition-mcp",
         # 需求 P2 工具表（2026-08-12 对齐）：临床=✔ 家庭=✔ → parent + doctor 双写；
+        # 演示家长 demo_parent_assistant 等价家长（2026-08-17，免令牌绑定）。
         # 豁免矩阵回查（_MATRIX_EXEMPT_WRITE_TOOLS），受 enforce_nutrition_tool 工具级 ACL 管辖。
-        "allowed": frozenset({"parent_assistant", "doctor_assistant"}),
+        "allowed": frozenset({"parent_assistant", "doctor_assistant", "demo_parent_assistant"}),
         "requires_confirmation": False,
-        "note": "打卡落点，供 sum_diet_intake 与食谱参考依从性；医生可代录（临床=✔）",
+        "note": "打卡落点，供 sum_diet_intake 与食谱参考依从性；医生可代录（临床=✔）；演示家长等价家长",
     },
     # M11 log_meal_checkin / award_badge 退役
     "record_pew_risk": {
@@ -397,7 +421,7 @@ def _matrix_writers(mcp: str) -> frozenset[str]:
 
 # --- M1 HIS ---
 HIS_FULL_VIEW: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
-HIS_LIMITED: frozenset[str] = frozenset({"parent_assistant"})
+HIS_LIMITED: frozenset[str] = frozenset({"parent_assistant", "demo_parent_assistant"})
 HIS_READ: frozenset[str] = HIS_FULL_VIEW | HIS_LIMITED
 HIS_BLOCKED: frozenset[str] = frozenset()        # 无被完全封锁的角色
 HIS_COHORT: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
@@ -419,7 +443,7 @@ P1_PARENT_HIDDEN_FIELDS: frozenset[str] = frozenset({
 
 # --- M2 LIS ---
 LIS_READ_FULL: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
-LIS_READ_LIMITED: frozenset[str] = frozenset({"parent_assistant"})
+LIS_READ_LIMITED: frozenset[str] = frozenset({"parent_assistant", "demo_parent_assistant"})
 LIS_CRITICAL_CHANNEL: frozenset[str] = frozenset({"risk_warning", "doctor_assistant"})
 LIS_WRITE_ALLOWED: frozenset[str] = _matrix_writers("CKDNutri-clinical-data-mcp")   # {doctor}
 
@@ -441,6 +465,7 @@ NUTRITION_ASSESSMENT_DATA_TOOLS: frozenset[str] = frozenset({
 })
 NUTRITION_ASSESSMENT_DATA_ROLES: frozenset[str] = frozenset({
     "parent_assistant",
+    "demo_parent_assistant",
     "doctor_assistant",
 })
 NUTRITION_ASSESSMENT_CLINICAL_TOOLS: frozenset[str] = frozenset({
