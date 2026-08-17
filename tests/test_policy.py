@@ -54,12 +54,16 @@ from a207_policy import (  # noqa: E402
     translate_error,
 )
 
-RESULTS: list[tuple[str, bool, str]] = []
+RESULTS: list[tuple[str, str, str]] = []  # status: "PASS" | "FAIL" | "SKIP"
 # 十二审（2026-08-17）：@check 注册的用例函数（直跑 main() 统一执行）。
 # 此前 check 装饰器在 **import 时立即执行** fn()——pytest 收集 test_* 后再次执行
 # 造成双执行（有状态副作用用例第二次失败）。改为**延迟执行**：check 只注册，
 # 直跑 main() 循环执行全部；pytest 收集 test_* 各执行一次。两种模式各只跑一次。
 CHECK_FNS: list[tuple[str, Any]] = []
+
+
+class _SkipTest(Exception):
+    """环境缺少外部依赖（如 sibling 包不在 checkout 中）时跳过，不计入失败。"""
 
 
 def check(name: str):
@@ -76,16 +80,18 @@ def check(name: str):
 
 
 def _run_checks() -> int:
-    """直跑模式：统一执行全部 @check 用例，返回失败数。"""
+    """直跑模式：统一执行全部 @check 用例，返回失败数（SKIP 不计入失败）。"""
     for name, fn in CHECK_FNS:
         try:
             fn()
-            RESULTS.append((name, True, ""))
+            RESULTS.append((name, "PASS", ""))
+        except _SkipTest as exc:
+            RESULTS.append((name, "SKIP", str(exc)))
         except AssertionError as exc:
-            RESULTS.append((name, False, str(exc) or "断言失败"))
+            RESULTS.append((name, "FAIL", str(exc) or "断言失败"))
         except Exception:  # noqa: BLE001
-            RESULTS.append((name, False, traceback.format_exc(limit=3)))
-    return sum(1 for _, ok, _ in RESULTS if not ok)
+            RESULTS.append((name, "FAIL", traceback.format_exc(limit=3)))
+    return sum(1 for _, s, _ in RESULTS if s == "FAIL")
 
 
 def _reset(caller: str = "doctor_assistant") -> None:
@@ -725,17 +731,22 @@ def _demo_p1_limited_scope():
     import sys
     from pathlib import Path as _P
     clinical_src = _P(__file__).resolve().parents[2] / "CKDNutri-clinical-data-mcp" / "src"
-    if str(clinical_src) not in sys.path:
-        sys.path.insert(0, str(clinical_src))
-    spec = importlib.util.spec_from_file_location(
-        "a207_demo_probe_his",
-        clinical_src / "CKDNutri_clinical_data_mcp" / "his.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
+    # 端到端集成测试依赖下游 CKDNutri-clinical-data-mcp 包；a207-policy 的 CI 仅
+    # checkout 本仓库，无此 sibling（本地两包同目录时才存在）→ 跳过而非失败。
+    if not clinical_src.exists():
+        raise _SkipTest(
+            "clinical-data 包不在 a207-policy 仓库 checkout 中（端到端集成测试仅在两包同目录时运行）")
     try:
+        if str(clinical_src) not in sys.path:
+            sys.path.insert(0, str(clinical_src))
+        spec = importlib.util.spec_from_file_location(
+            "a207_demo_probe_his",
+            clinical_src / "CKDNutri_clinical_data_mcp" / "his.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-    except Exception as exc:  # noqa: BLE001
-        raise AssertionError(f"无法导入 clinical-data his 模块以端到端验证：{exc}")
+    except (ImportError, FileNotFoundError) as exc:
+        raise _SkipTest(f"无法加载 clinical-data his 模块以端到端验证（跳过）：{exc}")
     assert mod._scope_of("demo_parent_assistant") == "limited_parent", \
         "演示家长未获得 P1 受限家长视图"
     assert mod._scope_of("parent_assistant") == "limited_parent"
@@ -752,18 +763,26 @@ def _demo_p1_profile_stripped():
     from pathlib import Path as _P
     clinical_src = _P(__file__).resolve().parents[2] / "CKDNutri-clinical-data-mcp" / "src"
     pkg_dir = clinical_src / "CKDNutri_clinical_data_mcp"
+    # 端到端集成测试依赖下游 CKDNutri-clinical-data-mcp 包；a207-policy 的 CI 仅
+    # checkout 本仓库，无此 sibling（本地两包同目录时才存在）→ 跳过而非失败。
+    if not pkg_dir.exists():
+        raise _SkipTest(
+            "clinical-data 包不在 a207-policy 仓库 checkout 中（端到端集成测试仅在两包同目录时运行）")
     # 以正式子模块方式加载 his（使其 `from .repository import` 相对导入可解析）
-    if "CKDNutri_clinical_data_mcp" not in sys.modules:
-        pkg_spec = importlib.util.spec_from_file_location(
-            "CKDNutri_clinical_data_mcp", pkg_dir / "__init__.py")
-        pkg_mod = importlib.util.module_from_spec(pkg_spec)
-        sys.modules["CKDNutri_clinical_data_mcp"] = pkg_mod
-        pkg_spec.loader.exec_module(pkg_mod)
-    spec = importlib.util.spec_from_file_location(
-        "CKDNutri_clinical_data_mcp.his", pkg_dir / "his.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["CKDNutri_clinical_data_mcp.his"] = mod
-    spec.loader.exec_module(mod)
+    try:
+        if "CKDNutri_clinical_data_mcp" not in sys.modules:
+            pkg_spec = importlib.util.spec_from_file_location(
+                "CKDNutri_clinical_data_mcp", pkg_dir / "__init__.py")
+            pkg_mod = importlib.util.module_from_spec(pkg_spec)
+            sys.modules["CKDNutri_clinical_data_mcp"] = pkg_mod
+            pkg_spec.loader.exec_module(pkg_mod)
+        spec = importlib.util.spec_from_file_location(
+            "CKDNutri_clinical_data_mcp.his", pkg_dir / "his.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["CKDNutri_clinical_data_mcp.his"] = mod
+        spec.loader.exec_module(mod)
+    except (ImportError, FileNotFoundError) as exc:
+        raise _SkipTest(f"无法加载 clinical-data 包以端到端验证（跳过）：{exc}")
 
     prev_backend = os.environ.get("A207_STORAGE_BACKEND")
     prev_token_dir = os.environ.get("A207_GUARDIAN_TOKEN_DIR")
@@ -844,13 +863,17 @@ def _p1_parent_hidden_fields_coverage():
 def main() -> int:
     # 十二审：直跑模式先统一执行全部 @check（此前在 import 时立即执行）
     _run_checks()
-    for name, ok, msg in RESULTS:
-        print(f"[{'PASS' if ok else 'FAIL'}] {name}")
-        if not ok:
+    for name, status, msg in RESULTS:
+        print(f"[{status}] {name}")
+        if status == "FAIL":
             print("       " + msg.strip().replace("\n", "\n       "))
-    passed = sum(1 for _, ok, _ in RESULTS if ok)
-    failed = len(RESULTS) - passed
-    print(f"\n合计 {len(RESULTS)} 项：通过 {passed}，失败 {failed}")
+    passed = sum(1 for _, s, _ in RESULTS if s == "PASS")
+    failed = sum(1 for _, s, _ in RESULTS if s == "FAIL")
+    skipped = sum(1 for _, s, _ in RESULTS if s == "SKIP")
+    line = f"\n合计 {len(RESULTS)} 项：通过 {passed}，失败 {failed}"
+    if skipped:
+        line += f"，跳过 {skipped}"
+    print(line)
     return 1 if failed else 0
 
 
