@@ -36,6 +36,19 @@ logger = logging.getLogger("a207-policy.storage")
 _ITEM_ID_KEYS = ("record_id", "plan_id", "notification_id", "id", "entry_id")
 
 
+def _mask_pk(pk: list[tuple[str, str]] | tuple) -> str:
+    """主键脱敏（日志用，P2-5 2026-08-18）：STR 值掩码为前 4 字符 + ***。
+
+    医疗合规：异常日志不得落明文 patient_id（患者标识属敏感数据）。
+    仅展示用，不影响任何取值/比较逻辑。
+    """
+    parts = []
+    for name, val in pk:
+        s = str(val)
+        parts.append(f"{name}={s[:4]}***" if len(s) > 4 else f"{name}=***")
+    return ",".join(parts)
+
+
 def _item_key(item: Any) -> tuple:
     """列表元素去重键：dict 优先取业务 id 键，否则按 JSON 序列化全等。"""
     if isinstance(item, dict):
@@ -138,7 +151,8 @@ class TablestoreBase:
             # fail-closed：存储故障（网络/超时/鉴权）抛 RuntimeError（→ INTERNAL_ERROR），
             # 不得静默当"行不存在"——否则 Tablestore 抖动会被误判为"无数据"（医疗数据
             # 可信度受损）。行不存在（row is None）是 SDK 正常返回，不抛。
-            logger.error("Tablestore get_row 失败: table=%s pk=%s exc=%s", table, pk, exc)
+            logger.error("Tablestore get_row 失败: table=%s pk=%s exc=%s",
+                         table, _mask_pk(pk), exc)
             raise RuntimeError(
                 f"Tablestore 读取失败（table={table}），详情见服务端日志") from exc
         if row is None:
