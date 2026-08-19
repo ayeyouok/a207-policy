@@ -93,5 +93,30 @@ def test_merge_row_list_merge_unaffected():
     assert out["workflow_status"] == "resolved", out  # 状态仍单调
 
 
+def test_merge_row_corrupt_json_list_rejected():
+    """care BUG-4（2026-08-19）：已注册 JSON list 字段旧值损坏/非 list → 拒绝覆盖。
+
+    此前 _merge_row 捕获 JSONDecodeError 后用新值静默覆盖（损坏数据无声消失）；
+    注册 JSON list 字段后：旧值非法 JSON / 解析成功但非 list（{}、123、null）一律
+    抛 RuntimeError（fail-closed，交由运维修复存储行），不得静默淹没。
+    """
+    from a207_policy import storage as _storage_mod
+
+    _storage_mod._JSON_LIST_FIELDS.add("records")  # 注册（幂等）
+    try:
+        for bad_old in ("{broken", "{}", "123", "null", '"hello"'):
+            try:
+                _merge_row({"records": bad_old}, {"records": '[{"id": "r1"}]'})
+            except RuntimeError:
+                continue
+            raise AssertionError(f"旧值 {bad_old!r} 损坏/非 list 应拒绝覆盖")
+        # 合法 list 旧值仍正常合并
+        out = _merge_row({"records": '[{"id": "r1"}]'},
+                         {"records": '[{"id": "r2"}]'})
+        assert '"r1"' in out["records"] and '"r2"' in out["records"], out
+    finally:
+        _storage_mod._JSON_LIST_FIELDS.discard("records")
+
+
 if __name__ == "__main__":
     _run_all()

@@ -79,6 +79,12 @@ def _merge_lists(cur: list, new: list) -> list:
 # （care 的 workflow_status 序值是 care 域契约），由业务层启动时注册（幂等）。
 _MONOTONIC_FIELDS: dict[str, dict[str, int]] = {}
 
+# 审查（2026-08-19，care BUG-4）：JSON list 语义字段注册表——对注册字段，_merge_row
+# 冲突合并时旧值 JSON 无法解析或解析后非 list → **拒绝合并并抛错**（fail-closed，
+# 不静默用新值覆盖损坏数据）。普通字符串字段行为不变。业务层把 list 语义列序列化为
+# JSON 字符串存储（LOW-7 契约），注册方需确保该列确实以 JSON 数组形式存储。
+_JSON_LIST_FIELDS: set[str] = set()
+
 
 def register_monotonic_field(field: str, order: dict[str, int]) -> None:
     """注册单调合并字段（幂等；多进程/重复导入安全，重复注册同值无害）。
@@ -88,6 +94,30 @@ def register_monotonic_field(field: str, order: dict[str, int]) -> None:
       {"unacked": 0, "confirmed": 1, "resolved": 2, "closed": 3}
     """
     _MONOTONIC_FIELDS[field] = dict(order)
+
+
+def register_json_list_field(field: str) -> None:
+    """注册 JSON list 语义字段（幂等；重复注册无害）。
+
+    _merge_row 对该字段冲突合并时严格校验旧值：JSON 无法解析或解析后非 list →
+    抛 RuntimeError 拒绝覆盖（损坏/错误类型数据不得被新值静默淹没，交由运维修复）。
+    示例（care）：records / plans / adherence。
+    """
+    _JSON_LIST_FIELDS.add(field)
+
+
+def is_condition_conflict(exc: Any) -> bool:
+    """判断 OTSClientError 是否为**条件检查冲突**（审查 2026-08-19，care BUG-1）。
+
+    Tablestore 条件写（Condition：EXPECT_NOT_EXIST / _REV==N）不满足时 SDK 抛
+    OTSClientError（code 含 "ConditionCheck" / message 含 "not match"）；**只有这种**
+    错误才代表"数据竞争/已存在"，其余 OTSClientError（鉴权失败、参数非法、表不存在、
+    网络/超时等）是环境/配置问题，必须继续抛出让上层定位，**不得误判为 DUPLICATE
+    或并发冲突**。_save_row_locked 与 care 的 save_notification_expect_not_exist 共用。
+    """
+    code = str(getattr(exc, "code", "") or "")
+    msg = str(getattr(exc, "message", "") or "")
+    return "ConditionCheck" in code or "ConditionCheck" in msg or "not match" in msg.lower()
 
 
 def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
@@ -116,6 +146,19 @@ def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
         if _mono is not None and isinstance(value, str) and isinstance(cur_value, str):
             if cur_value in _mono and value in _mono and _mono[value] < _mono[cur_value]:
                 continue  # stale 低阶状态 → 保留 current 高阶状态
+        # 审查（2026-08-19，care BUG-4）：已注册 JSON list 字段，旧值损坏/非 list →
+        # 拒绝合并（fail-closed，不静默覆盖损坏数据）。未注册字段维持原行为。
+        if key in _JSON_LIST_FIELDS and isinstance(cur_value, str):
+            try:
+                _cur_parsed = json.loads(cur_value)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"字段 {key} 存储值损坏（非法 JSON）：拒绝覆盖，"
+                    "请人工修复 Tablestore 该行数据") from exc
+            if not isinstance(_cur_parsed, list):
+                raise RuntimeError(
+                    f"字段 {key} 存储值类型错误（期望 JSON 数组，实际 "
+                    f"{type(_cur_parsed).__name__}）：拒绝覆盖，请人工修复存储行")
         # 两端都是 JSON 数组字符串 → 反序列化按 id 去重合并
         if isinstance(cur_value, str) and isinstance(value, str):
             try:
@@ -273,11 +316,16 @@ class TablestoreBase:
                 # 首次更新 3 次重试后 INTERNAL_ERROR 且无自动修复路径。先**无条件
                 # 补列初始化**（force：仅行存在性期望，幂等无害），下一轮走正常
                 # 条件更新。B1-2：补列不占 attempts（不消耗 CAS 重试预算）。
+                # 审查（2026-08-19，clinical-data 审查 ①）：补列**只写 _rev 列**，
+                # 不携带任何业务数据 force 写回——旧实现 `legacy = dict(next_attrs)`
+                # 把"读到的 current + 本次修改"整行 force 写回，并发两个请求同时补列
+                # 时后写者覆盖先写者的业务修改（丢更新，且无 _rev 条件可拦截）。
+                # 只写 {_rev: 0} 幂等无害（业务列不动）；随后 continue 重新读取
+                # （行已带 _rev=0），走正常 CAS（_rev==0 条件写，合并并发修改）。
                 if self._REV_COL not in current:
-                    legacy = dict(next_attrs)
-                    legacy[self._REV_COL] = 0
                     self._put_row_conditioned(
-                        table, pk, legacy, rev=0, expect_exists=True, force=True)
+                        table, pk, {self._REV_COL: 0}, rev=0,
+                        expect_exists=True, force=True)
                     continue
             next_attrs[self._REV_COL] = rev + 1
             attempts += 1  # 仅正常 CAS 尝试消耗预算（补列不占）
@@ -286,11 +334,9 @@ class TablestoreBase:
                     table, pk, next_attrs, rev, expect_exists=current is not None)
                 return
             except OTSClientError as exc:
-                code = str(getattr(exc, "code", "") or "")
-                msg = str(getattr(exc, "message", "") or "")
-                is_conflict = ("ConditionCheck" in code or "ConditionCheck" in msg
-                               or "not match" in msg.lower())
-                if not is_conflict:
+                # 审查（2026-08-19）：冲突判定收敛到公共函数 is_condition_conflict
+                # （care save_notification_expect_not_exist 共用，杜绝两处口径漂移）。
+                if not is_condition_conflict(exc):
                     raise  # C-B4：SDK 错误（鉴权/表不存在等）立即抛，定位真实根因
                 last_err = exc  # 条件不满足 → 并发写冲突，重试
         # 九审（2026-08-16）：乐观锁"重试仍失败"是**业务写冲突**（并发写者竞争），
@@ -319,7 +365,16 @@ class TablestoreBase:
         end = [(col, pre.get(col, INF_MAX)) for col in pk_cols]
         rows: list[dict[str, Any]] = []
         next_start = start
+        _prev_start: Any = None
         while next_start is not None:
+            # 审查（2026-08-19，care BUG-9）：分页游标不推进即抛错——SDK 异常/
+            # 边界 bug 导致 get_range 返回与本次相同的 next_start 时会无限循环
+            # （数据量越大越危险）；前后游标相同是明确的异常信号，fail-closed。
+            if next_start == _prev_start:
+                raise RuntimeError(
+                    f"Tablestore GetRange 分页游标未推进（table={table}），"
+                    "疑似 SDK 异常，拒绝无限循环——请检查存储服务状态")
+            _prev_start = next_start
             consumed, next_start, row_list, _ = self._get_client().get_range(
                 table, "FORWARD", next_start, end, limit=200)
             for row in row_list:
