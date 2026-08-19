@@ -74,6 +74,22 @@ def _merge_lists(cur: list, new: list) -> list:
     return result
 
 
+# 审查 P1-3（2026-08-18）：单调字段注册表——业务状态机字段 + 状态序值。
+# 设计取舍：storage 是 a207-policy 共享层，不硬编码任何业务字段名/状态枚举
+# （care 的 workflow_status 序值是 care 域契约），由业务层启动时注册（幂等）。
+_MONOTONIC_FIELDS: dict[str, dict[str, int]] = {}
+
+
+def register_monotonic_field(field: str, order: dict[str, int]) -> None:
+    """注册单调合并字段（幂等；多进程/重复导入安全，重复注册同值无害）。
+
+    :param field: 属性列名（如 care 的 "workflow_status"）
+    :param order: 状态名 → 序值（越大越高阶）。示例（care 闭环状态机）：
+      {"unacked": 0, "confirmed": 1, "resolved": 2, "closed": 3}
+    """
+    _MONOTONIC_FIELDS[field] = dict(order)
+
+
 def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """冲突重试合并：以**最新行**为底，new 非 None 字段覆盖；JSON 列表字段去重合并。
 
@@ -84,10 +100,22 @@ def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     合并逻辑仅当 cur_value 与 value 都是 str 且都解析为 list 时才走按 id 去重合并；
     其余情况一律普通覆盖。业务层写入列表列时必须用 `json.dumps(list, ensure_ascii=False)`
     而非 Python 原对象，否则乐观锁冲突重试时该列会被整值覆盖（丢并发新增）。
+
+    审查 P1-3（2026-08-18，care 联动）：**单调字段防状态机回退**——业务状态机字段
+    （如 care 的 workflow_status）经 register_monotonic_field 注册序值后，冲突合并时
+    new 序值**低于** current 即保留 current：stale 写者的低阶状态不得覆盖最新高阶
+    状态（并发场景：A 读到 unacked 准备 confirmed，B 已推进到 resolved；A 冲突重试
+    合并时 confirmed 不得把 resolved 拉回）。new 序值 ≥ current 时正常覆盖
+    （同值幂等、高阶推进合法）。未注册字段行为不变（new 优先）。
     """
     merged = dict(current)
     for key, value in new.items():
         cur_value = merged.get(key)
+        # 单调字段：冲突合并取高序值（防状态机回退）
+        _mono = _MONOTONIC_FIELDS.get(key)
+        if _mono is not None and isinstance(value, str) and isinstance(cur_value, str):
+            if cur_value in _mono and value in _mono and _mono[value] < _mono[cur_value]:
+                continue  # stale 低阶状态 → 保留 current 高阶状态
         # 两端都是 JSON 数组字符串 → 反序列化按 id 去重合并
         if isinstance(cur_value, str) and isinstance(value, str):
             try:
@@ -195,8 +223,13 @@ class TablestoreBase:
         # 🔴 真实踩坑（2026-08-13）：此前 import SingleColumnValueCondition——该符号
         # 在 tablestore 6.x SDK **不存在**（正确类名 SingleColumnCondition），生产切
         # Tablestore 写即 ImportError。已修正并补 Fake 回归，勿再改回。
-        from tablestore import (ComparatorType, Condition, Row,
-                                RowExistenceExpectation, SingleColumnCondition)
+        from tablestore import (
+            ComparatorType,
+            Condition,
+            Row,
+            RowExistenceExpectation,
+            SingleColumnCondition,
+        )
 
         expectation = (RowExistenceExpectation.EXPECT_EXIST if expect_exists
                        else RowExistenceExpectation.EXPECT_NOT_EXIST)
@@ -309,8 +342,7 @@ class TablestoreBase:
         :param specs: {table_name: [(pk_col, "STRING"), ...]}——主键 schema 单一事实源
         留在各包 repository（表名/主键是各域数据契约，不并入本模块）。
         """
-        from tablestore import (CapacityUnit,
-                                ReservedThroughput, TableMeta, TableOptions)
+        from tablestore import CapacityUnit, ReservedThroughput, TableMeta, TableOptions
 
         # B5-1（2026-08-16，十审）：复用 _get_client()——此前这里重建第二个
         # OTSClient（endpoint/ak/sk/instance 从环境变量取），忽略测试注入的

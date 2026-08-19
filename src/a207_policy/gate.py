@@ -15,9 +15,9 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any  # 十审（2026-08-16）：此前未导入，validate_patient_id 的
+
 # patient_id: Any 靠 `from __future__ import annotations` 惰性字符串——运行时无碍
 # 但 typing.get_type_hints / Pydantic schema 内省抛 NameError。补导入。
-
 from .caller import get_caller
 from .exceptions import PermissionDenied
 from .matrix import (
@@ -31,8 +31,8 @@ from .matrix import (
     NUTRITION_ASSESSMENT_WRITE_ALLOWED,
     PERMISSION_MATRIX,
     RETIRED_WRITE_TOOLS,
-    WRITE_TOOL_POLICY,
     WRITE_TOOL_ALIASES,
+    WRITE_TOOL_POLICY,
     normalize_mcp,
     resolve_access,
 )
@@ -384,7 +384,7 @@ GUARDIAN_TOKEN_STORE = "guardian_tokens.json"
 GUARDIAN_TOKEN_DIR_ENV = "A207_GUARDIAN_TOKEN_DIR"
 
 
-def _guardian_store_path() -> "os.PathLike[str]":
+def _guardian_store_path() -> os.PathLike[str]:
     base = os.environ.get(GUARDIAN_TOKEN_DIR_ENV)
     return resolve_state_path(GUARDIAN_TOKEN_STORE, base=base)
 

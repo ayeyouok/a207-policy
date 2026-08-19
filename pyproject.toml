@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a207-policy"
-version = "0.3.39"
+version = "0.3.40"
 description = "A207 统一身份注入 / 权限矩阵 / 状态路径策略包（Plan A 单一事实源）"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -14,3 +14,18 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # 行超长不阻断（存量历史注释多），仅提示
+
+[tool.ruff.lint.per-file-ignores]
+# 测试：sys.path/env 设置在 import 前（既有标准模式）；__init__：先定义 __version__
+# 再 import 子模块（防循环导入，有意设计）
+"tests/*" = ["E402"]
+"src/*/__init__.py" = ["E402"]

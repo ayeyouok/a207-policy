@@ -10,8 +10,9 @@ v2.3 阶段 0（2026-08-11）：角色从 6 瘦身为 2 + 1 管线身份。
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Mapping, TypedDict, cast
+from typing import TypedDict, cast
 
 # ---------------------------------------------------------------- 角色与 MCP
 
@@ -111,8 +112,7 @@ def normalize_mcp(name: str) -> str:
     if not key:
         return ""
     # 1. 剥离协议前缀与 :action / 路径后缀
-    if key.startswith("mcp://"):
-        key = key[6:]
+    key = key.removeprefix("mcp://")
     key = key.split(":")[0].split("/")[0].strip()
     if not key:
         return ""

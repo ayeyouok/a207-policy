@@ -14,8 +14,8 @@ HTTP/SSE 部署（将来）：网关在会话建立时把身份写入请求上�
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, Optional
 
 from .exceptions import CallerUnknown
 from .matrix import CALLERS
@@ -69,7 +69,7 @@ def get_caller() -> str:
     return value
 
 
-def set_caller(value: Optional[str]) -> None:
+def set_caller(value: str | None) -> None:
     """仅用于测试：覆盖 caller 来源（写入 A207_CALLER 环境变量）。生产代码不得调用。
 
     P0-2 修复（2026-08-13）+ N-SEC-1（2026-08-14）：生产环境调用即抛 RuntimeError
@@ -84,7 +84,7 @@ def set_caller(value: Optional[str]) -> None:
 
 
 @contextmanager
-def as_caller(value: Optional[str]) -> Iterator[None]:
+def as_caller(value: str | None) -> Iterator[None]:
     """仅用于测试：在代码块内临时切换身份，退出时**一定**还原（异常也还原）。
 
     为什么需要它

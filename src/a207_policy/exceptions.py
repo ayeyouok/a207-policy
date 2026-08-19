@@ -74,4 +74,3 @@ except (ImportError, AttributeError) as _exc:
     import logging as _logging
     _logging.getLogger(__name__).warning(
         "a207_policy 全局包不可用（%s: %s），异常类回退本地副本", type(_exc).__name__, _exc)
-    pass

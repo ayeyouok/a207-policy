@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
 """P-B1~P-B6 回归测试（2026-08-14 修复后固化）。pytest + 直接运行双模式。"""
 import os
+
 os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏（2026-08-15）：测试进程显式确认 json 后端为开发模式
 import sys
@@ -20,7 +20,7 @@ def test_pb1_forged_caller_rejected():
         try:
             gate.enforce_nutrition_tool("doctor_assistant", "calc_prnt_targets")
         except exceptions.PermissionDenied:
-            raise AssertionError("真实身份不应被拒")
+            raise AssertionError("真实身份不应被拒") from None
         try:
             gate.enforce_nutrition_tool("parent_assistant", "calc_prnt_targets")
         except exceptions.PermissionDenied:
@@ -31,9 +31,7 @@ def test_pb1_forged_caller_rejected():
 
 def test_pb2_enforce_write_read_rejected():
     """P-B2：enforce_write('read') 拒绝（保留字不得静默降级为读检查）。"""
-    from a207_policy import exceptions, gate
-
-    from a207_policy import as_caller
+    from a207_policy import as_caller, exceptions, gate
 
     with as_caller("doctor_assistant"):
         try:
@@ -46,9 +44,7 @@ def test_pb2_enforce_write_read_rejected():
 
 def test_pb3_retired_tool_rejected():
     """P-B3：push_to_emr 中英文一律拒绝（退役工具，结论一致）。"""
-    from a207_policy import exceptions, gate
-
-    from a207_policy import as_caller
+    from a207_policy import as_caller, exceptions, gate
 
     with as_caller("doctor_assistant"):
         for action in ("push_to_emr", "写回病历", "写入病历"):

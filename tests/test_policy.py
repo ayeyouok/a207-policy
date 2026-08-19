@@ -15,6 +15,7 @@ a207-policy 是 5 个 CKDNutri MCP 包共同的信任根。它错一行，5 个�
 from __future__ import annotations
 
 import os
+
 os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏（2026-08-15）：测试进程显式确认 json 后端为开发模式
 import sys
@@ -25,13 +26,14 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from a207_policy import (  # noqa: E402
+from typing import Any
+
+from a207_policy import (
     ACCESS_LIMITED,
     ACCESS_NONE,
     ACCESS_READ,
     ACCESS_RW,
     CALLERS,
-    CHILD_FORBIDDEN_MCPS,
     CLINICIAN_ONLY_FIELDS,
     KNOWLEDGE_PROFILE,
     MCP_ALIASES,
@@ -409,16 +411,16 @@ def _normalize_strip_action_suffix():
 
 @check("_matrix_writers 防归一化：传入废弃旧名也能安全派生（不 KeyError）")
 def _matrix_writers_normalize():
-    from a207_policy.matrix import _matrix_writers  # noqa: E402
+    from a207_policy.matrix import _matrix_writers
     got = _matrix_writers("a207-followup-mcp")
     assert got == _matrix_writers("CKDNutri-care-mcp"), "旧名 a207-followup-mcp 未正确归一"
 
 
 @check("GAMIFICATION_MCP 已纠正符号漂移（指向 M11 并入后的 P2）")
 def _gamification_symbol():
-    from a207_policy.matrix import GAMIFICATION_MCP  # noqa: E402
+    from a207_policy.matrix import GAMIFICATION_MCP
     assert GAMIFICATION_MCP == "CKDNutri-nutrition-mcp"
-    from a207_policy.matrix import GAMIFICATION_ALLOWED  # noqa: E402
+    from a207_policy.matrix import GAMIFICATION_ALLOWED
     assert GAMIFICATION_ALLOWED == frozenset(), "退役包写白名单必须仍为空（fail-closed）"
 
 
@@ -426,9 +428,9 @@ def _gamification_symbol():
 
 @check("NUTRITION_ASSESSMENT_WRITE_ALLOWED 必须从矩阵派生（OD-011，禁手写更宽集合）")
 def _nutrition_write_derived():
-    from a207_policy.matrix import (  # noqa: E402
-        _matrix_writers,
+    from a207_policy.matrix import (
         NUTRITION_ASSESSMENT_WRITE_ALLOWED,
+        _matrix_writers,
     )
     assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == _matrix_writers("CKDNutri-nutrition-mcp"), \
         "写白名单未与矩阵保持一致"
@@ -438,7 +440,7 @@ def _nutrition_write_derived():
 
 @check("LIS 写白名单由矩阵派生；FOLLOWUP 强制收口为仅医生（有意识不派生，防 risk 误写随访落盘）；NOTIFY 写白名单由矩阵派生——三个集合并存且均为确定性")
 def _other_writes_derived():
-    from a207_policy.matrix import (  # noqa: E402
+    from a207_policy.matrix import (
         FOLLOWUP_WRITE_ALLOWED,
         LIS_WRITE_ALLOWED,
         NOTIFY_WRITE_ROLES,
@@ -498,7 +500,7 @@ def _adherence_registered():
 
 @check("矩阵↔写策略一致：非豁免写工具，allowed 角色在矩阵必须 R/W")
 def _matrix_write_consistent():
-    from a207_policy.gate import _MATRIX_EXEMPT_WRITE_TOOLS  # noqa: E402
+    from a207_policy.gate import _MATRIX_EXEMPT_WRITE_TOOLS
     bad = []
     for tool, policy in WRITE_TOOL_POLICY.items():
         if tool in _MATRIX_EXEMPT_WRITE_TOOLS:
@@ -658,7 +660,11 @@ def _demo_registered_caller():
 
 @check("演示家长属于 PARENT_EQUIVALENT_ROLES（家长视图/家长级放行判定集合）")
 def _demo_in_equivalent_roles():
-    from a207_policy.matrix import PARENT_EQUIVALENT_ROLES, DEMO_PARENT_ROLE, PARENT_ROLE
+    from a207_policy.matrix import (
+        DEMO_PARENT_ROLE,
+        PARENT_EQUIVALENT_ROLES,
+        PARENT_ROLE,
+    )
     assert DEMO_PARENT_ROLE in PARENT_EQUIVALENT_ROLES
     assert PARENT_ROLE in PARENT_EQUIVALENT_ROLES
     # 仅家长等价两类，不含临床/风险
@@ -680,7 +686,7 @@ def _demo_read_scope():
 
 @check("演示家长与家长的读权完全一致（各 MCP 矩阵取值相等）")
 def _demo_matches_parent_matrix():
-    from a207_policy.matrix import PERMISSION_MATRIX, DEMO_PARENT_ROLE, PARENT_ROLE
+    from a207_policy.matrix import DEMO_PARENT_ROLE, PARENT_ROLE, PERMISSION_MATRIX
     for mcp, row in PERMISSION_MATRIX.items():
         assert row[DEMO_PARENT_ROLE] == row[PARENT_ROLE], \
             f"{mcp}：demo({row[DEMO_PARENT_ROLE]}) 与家长({row[PARENT_ROLE]}) 不一致"
@@ -706,20 +712,24 @@ def _demo_no_lab_write():
 
 @check("演示家长在临床判读字段「绝不可见」集合内（P5 报告层据此剥除，与 parent 一致）")
 def _demo_clinician_hidden():
-    from a207_policy.matrix import CLINICIAN_ONLY_HIDDEN_FROM, DEMO_PARENT_ROLE, PARENT_ROLE
+    from a207_policy.matrix import (
+        CLINICIAN_ONLY_HIDDEN_FROM,
+        DEMO_PARENT_ROLE,
+        PARENT_ROLE,
+    )
     assert DEMO_PARENT_ROLE in CLINICIAN_ONLY_HIDDEN_FROM
     assert PARENT_ROLE in CLINICIAN_ONLY_HIDDEN_FROM
 
 
 @check("演示家长语料分级=plain_language（与 parent 一致，通俗语料）")
 def _demo_knowledge_profile():
-    from a207_policy.matrix import KNOWLEDGE_PROFILE, DEMO_PARENT_ROLE
+    from a207_policy.matrix import DEMO_PARENT_ROLE, KNOWLEDGE_PROFILE
     assert KNOWLEDGE_PROFILE[DEMO_PARENT_ROLE] == "plain_language"
 
 
 @check("演示家长不在临床/风险专属写集合（LIS 写权仅 doctor；令牌闸对其自动免绑定）")
 def _demo_not_clinician_write():
-    from a207_policy.matrix import LIS_WRITE_ALLOWED, DEMO_PARENT_ROLE
+    from a207_policy.matrix import DEMO_PARENT_ROLE, LIS_WRITE_ALLOWED
     assert DEMO_PARENT_ROLE not in LIS_WRITE_ALLOWED, "演示家长不应获得化验写权"
 
 
@@ -746,7 +756,8 @@ def _demo_p1_limited_scope():
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     except (ImportError, FileNotFoundError) as exc:
-        raise _SkipTest(f"无法加载 clinical-data his 模块以端到端验证（跳过）：{exc}")
+        # 环境缺 sibling 包属测试跳过（非失败），原始异常无诊断价值（B904）
+        raise _SkipTest(f"无法加载 clinical-data his 模块以端到端验证（跳过）：{exc}") from None
     assert mod._scope_of("demo_parent_assistant") == "limited_parent", \
         "演示家长未获得 P1 受限家长视图"
     assert mod._scope_of("parent_assistant") == "limited_parent"
@@ -782,7 +793,8 @@ def _demo_p1_profile_stripped():
         sys.modules["CKDNutri_clinical_data_mcp.his"] = mod
         spec.loader.exec_module(mod)
     except (ImportError, FileNotFoundError) as exc:
-        raise _SkipTest(f"无法加载 clinical-data 包以端到端验证（跳过）：{exc}")
+        # 环境缺 sibling 包属测试跳过（非失败），原始异常无诊断价值（B904）
+        raise _SkipTest(f"无法加载 clinical-data 包以端到端验证（跳过）：{exc}") from None
 
     prev_backend = os.environ.get("A207_STORAGE_BACKEND")
     prev_token_dir = os.environ.get("A207_GUARDIAN_TOKEN_DIR")
