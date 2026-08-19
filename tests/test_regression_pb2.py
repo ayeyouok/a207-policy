@@ -6,6 +6,9 @@
 - 高阶推进合法（new 序 ≥ current 序时覆盖）
 - 同值幂等 / 未知状态回退默认行为
 - JSON 列表合并不受单调字段影响
+
+运行：pytest tests/test_regression_pb2.py（或 python tests/test_regression_pb2.py 直接运行，
+CI 的 publish workflow 逐文件 `python tests/test_*.py`，**不安装 pytest**——本文件不依赖 pytest）。
 """
 import os
 
@@ -22,6 +25,16 @@ for p in (_SRC,):
 from a207_policy.storage import _merge_row, register_monotonic_field
 
 _WS_ORDER = {"unacked": 0, "confirmed": 1, "resolved": 2, "closed": 3}
+
+
+def _run_all() -> None:
+    """直接运行模式：执行本文件全部 test_* 函数（CI 的 `python tests/test_*.py`）。"""
+    import sys as _sys
+
+    for _name, _fn in sorted(vars(_sys.modules[__name__]).items()):
+        if _name.startswith("test_") and callable(_fn):
+            _fn()
+    print("PB2 REGRESSION OK")
 
 
 def test_merge_row_plain_scalar_new_wins():
@@ -78,3 +91,7 @@ def test_merge_row_list_merge_unaffected():
     hist = json.loads(out["escalated_history"])
     assert {h["id"] for h in hist} == {"h1", "h2"}, hist  # 列表仍合并
     assert out["workflow_status"] == "resolved", out  # 状态仍单调
+
+
+if __name__ == "__main__":
+    _run_all()
