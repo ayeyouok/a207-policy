@@ -29,6 +29,9 @@ DEMO_PARENT_ROLE: str = "demo_parent_assistant"
 # `caller in PARENT_EQUIVALENT_ROLES`，而非 `caller == PARENT_ROLE`，使新增家长等价
 # 身份零成本扩展（P1 his._scope_of / core.get_critical_values / core.get_lab_trend 已切换）。
 PARENT_EQUIVALENT_ROLES: frozenset[str] = frozenset({PARENT_ROLE, DEMO_PARENT_ROLE})
+# 演示家长免令牌可访问的患儿集合（BUG-41 修复，2026-08-20）：demo_parent_assistant
+# 走免令牌分支，但须钉死到此集合，禁止跨患儿越权。现场演示需使用的患儿 ID 在此登记。
+DEMO_ALLOWED_PATIENTS: frozenset[str] = frozenset({"P0007", "P0010", "P0020"})
 
 CALLERS: tuple[str, ...] = (
     "doctor_assistant",

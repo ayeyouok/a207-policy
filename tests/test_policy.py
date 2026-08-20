@@ -803,8 +803,13 @@ def _demo_p1_profile_stripped():
         os.environ["A207_STORAGE_BACKEND"] = "json"          # 免 OTS，读包内 patients.json
         os.environ["A207_GUARDIAN_TOKEN_DIR"] = tmp          # 令牌库隔离
         with as_caller("demo_parent_assistant"):
-            r = mod.get_patient_profile("P0001", None)        # demo 免令牌绑定
+            r = mod.get_patient_profile("P0007", None)        # demo 免令牌绑定（P0007 在演示患儿集）
         assert r.get("ok") is True, f"demo get_patient_profile 失败：{r}"
+        # BUG-41 回归：demo 访问非演示患儿必须被 FORBIDDEN（跨患儿越权防护）
+        with as_caller("demo_parent_assistant"):
+            r2 = mod.get_patient_profile("P0001", None)
+        assert r2.get("ok") is False and r2.get("error") == "FORBIDDEN", \
+            f"demo 访问非演示患儿未被拦截：{r2}"
         data = r.get("data", {})
         assert data.get("data_scope") == "limited_parent", \
             f"demo 未获得受限家长视图：data_scope={data.get('data_scope')}"
