@@ -37,6 +37,7 @@ from a207_policy import (
     CLINICIAN_ONLY_FIELDS,
     KNOWLEDGE_PROFILE,
     MCP_ALIASES,
+    P1_CHILD_READ_TOOLS,
     P1_PARENT_HIDDEN_FIELDS,
     PERMISSION_MATRIX,
     WRITE_TOOL_POLICY,
@@ -49,6 +50,7 @@ from a207_policy import (
     enforce_read,
     enforce_write,
     get_caller,
+    get_child_patient_id,
     knowledge_profile,
     normalize_mcp,
     resolve_state_path,
@@ -434,8 +436,14 @@ def _nutrition_write_derived():
     )
     assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == _matrix_writers("CKDNutri-nutrition-mcp"), \
         "写白名单未与矩阵保持一致"
-    assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == frozenset({"parent_assistant", "doctor_assistant", "demo_parent_assistant"}), \
-        f"营养写白名单={NUTRITION_ASSESSMENT_WRITE_ALLOWED}，期望 {{parent_assistant, doctor_assistant, demo_parent_assistant}}（需求 2026-08-12：临床可代录日记；2026-08-17：演示家长等价家长）"
+    # 2026-08-21：矩阵 nutrition×child=R/W（MCP 级：读食物/读摘要/写 child_foodlog），
+    # 故派生集合含 child_assistant；但**工具级 upsert_food_diary 对 child 显式拒绝**
+    # （gate.enforce_nutrition_tool 分支：food_diary 是医疗记录，仅家长/医生写；
+    # child 写权仅 record_child_food→child_foodlog）。WRITE_ALLOWED 仍保持
+    # "矩阵派生"单一事实源不变式（OD-011），工具级例外在 gate 集中收口。
+    assert NUTRITION_ASSESSMENT_WRITE_ALLOWED == frozenset({
+        "parent_assistant", "doctor_assistant", "demo_parent_assistant", "child_assistant"}), \
+        f"营养写白名单={NUTRITION_ASSESSMENT_WRITE_ALLOWED}，期望 {{parent_assistant, doctor_assistant, demo_parent_assistant, child_assistant}}（矩阵派生；child 的 upsert_food_diary 写权由 gate 工具级排除）"
 
 
 @check("LIS 写白名单由矩阵派生；FOLLOWUP 强制收口为仅医生（有意识不派生，防 risk 误写随访落盘）；NOTIFY 写白名单由矩阵派生——三个集合并存且均为确定性")
@@ -938,6 +946,93 @@ def _guardian_token_verify():
     assert verify_guardian_token("P9999", "tok-abc-123") is False
     assert verify_guardian_token("P9999", "") is False
     os.environ.pop("A207_GUARDIAN_TOKEN_DIR", None)
+
+
+# --------------------------------------------------------- child_assistant（2026-08-21）
+
+@check("child_assistant：矩阵五行已登记（P1=RL/P2=RW/P3=P4=NONE/P5=RL）")
+def _child_matrix_ok():
+    m = PERMISSION_MATRIX
+    assert m["CKDNutri-clinical-data-mcp"]["child_assistant"] == ACCESS_LIMITED
+    assert m["CKDNutri-nutrition-mcp"]["child_assistant"] == ACCESS_RW
+    assert m["CKDNutri-care-mcp"]["child_assistant"] == ACCESS_NONE
+    assert m["CKDNutri-assessment-mcp"]["child_assistant"] == ACCESS_NONE
+    assert m["CKDNutri-content-mcp"]["child_assistant"] == ACCESS_LIMITED
+
+
+@check("child_assistant：绑定患儿 env 缺失/空 → get_child_patient_id fail-closed（CallerUnknown）")
+def _child_binding_fail_closed():
+    prev = os.environ.get("A207_CHILD_PATIENT_ID")
+    try:
+        os.environ.pop("A207_CHILD_PATIENT_ID", None)
+        try:
+            get_child_patient_id()
+        except CallerUnknown:
+            pass
+        else:
+            raise AssertionError("未设置 A207_CHILD_PATIENT_ID 应抛 CallerUnknown（fail-closed）")
+        os.environ["A207_CHILD_PATIENT_ID"] = "   "
+        try:
+            get_child_patient_id()
+        except CallerUnknown:
+            pass
+        else:
+            raise AssertionError("空串 A207_CHILD_PATIENT_ID 应抛 CallerUnknown（fail-closed）")
+    finally:
+        _restore_env("A207_CHILD_PATIENT_ID", prev)
+
+
+@check("child_assistant：绑定 env 设置 → get_child_patient_id 返回该患儿")
+def _child_binding_ok():
+    prev = os.environ.get("A207_CHILD_PATIENT_ID")
+    try:
+        os.environ["A207_CHILD_PATIENT_ID"] = "P0020"
+        assert get_child_patient_id() == "P0020"
+    finally:
+        _restore_env("A207_CHILD_PATIENT_ID", prev)
+
+
+@check("child_assistant：P1 读工具白名单仅 get_patient_profile")
+def _child_p1_whitelist():
+    assert P1_CHILD_READ_TOOLS == frozenset({"get_patient_profile"}), P1_CHILD_READ_TOOLS
+
+
+@check("child_assistant：upsert_food_diary 工具级显式拒绝（矩阵 RW 派生包含 child 的收口）")
+def _child_upsert_food_diary_rejected():
+    import a207_policy.gate as _gate
+    from a207_policy import PermissionDenied as _PD
+
+    prev = os.environ.get("A207_CALLER")
+    try:
+        os.environ["A207_CALLER"] = "child_assistant"
+        try:
+            _gate.enforce_nutrition_tool("child_assistant", "upsert_food_diary")
+        except _PD:
+            pass
+        else:
+            raise AssertionError("child 写 upsert_food_diary 应被工具级拒绝")
+    finally:
+        _restore_env("A207_CALLER", prev)
+
+
+@check("child_assistant：record_child_food 工具级放行（仅 child）")
+def _child_record_food_allowed():
+    import a207_policy.gate as _gate
+
+    prev = os.environ.get("A207_CALLER")
+    try:
+        os.environ["A207_CALLER"] = "child_assistant"
+        assert _gate.enforce_nutrition_tool("child_assistant", "record_child_food") == ACCESS_RW
+        # 家长/医生写 record_child_food 拒绝
+        for other in ("parent_assistant", "doctor_assistant"):
+            os.environ["A207_CALLER"] = other
+            try:
+                _gate.enforce_nutrition_tool(other, "record_child_food")
+            except PermissionDenied:
+                continue
+            raise AssertionError(f"{other} 写 record_child_food 应被拒绝")
+    finally:
+        _restore_env("A207_CALLER", prev)
 
 
 if __name__ == "__main__":

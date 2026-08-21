@@ -33,10 +33,21 @@ PARENT_EQUIVALENT_ROLES: frozenset[str] = frozenset({PARENT_ROLE, DEMO_PARENT_RO
 # 走免令牌分支，但须钉死到此集合，禁止跨患儿越权。现场演示需使用的患儿 ID 在此登记。
 DEMO_ALLOWED_PATIENTS: frozenset[str] = frozenset({"P0007", "P0010", "P0020"})
 
+# 患儿身份（2026-08-21）：儿童自主记录端。单实例**绑单患儿**（env A207_CHILD_PATIENT_ID
+# 部署注入，如 P0020），读写范围钉死该患儿（fail-closed：未设置即拒绝，模型不可自证）。
+# 与 demo 家长"钉名单"的区别：child 是每实例一个患儿，用于孩子自己记饮食/查食物。
+CHILD_ROLE: str = "child_assistant"
+# child 绑定患儿的部署 env 名（部署配置注入，与 A207_CALLER 同模式）
+CHILD_PATIENT_ENV: str = "A207_CHILD_PATIENT_ID"
+# P1 读工具白名单（child 仅可访问）：child 只允许查自己档案（含 RL 脱敏视图），
+# 其余 P1 读工具（get_labs/get_diagnosis/get_critical_values/get_lab_trend 等）一律 FORBIDDEN。
+P1_CHILD_READ_TOOLS: frozenset[str] = frozenset({"get_patient_profile"})
+
 CALLERS: tuple[str, ...] = (
     "doctor_assistant",
     "parent_assistant",
     "demo_parent_assistant",     # 演示身份（家长等价、免令牌绑定，仅演示/沙箱）
+    "child_assistant",           # 患儿身份（2026-08-21：单实例绑单患儿，env A207_CHILD_PATIENT_ID）
     "risk_warning",             # 管线身份（非 Agent，仅 WRITE_TOOL_POLICY notify_* / 风险管线）
 )
 
@@ -163,7 +174,11 @@ CLINICIAN_ONLY_FIELDS: frozenset[str] = frozenset({
 
 # 上述字段「绝不可见」的角色（家庭助手 + 演示家长，二者家长级视图一致）。
 # M9 报告层据此做受限脱敏（OD-013）。
-CLINICIAN_ONLY_HIDDEN_FROM: frozenset[str] = frozenset({"parent_assistant", "demo_parent_assistant"})
+CLINICIAN_ONLY_HIDDEN_FROM: frozenset[str] = frozenset({
+    "parent_assistant", "demo_parent_assistant",
+    # 2026-08-21：患儿身份同家长受限报告视图（P5 报告剥临床判读字段）
+    "child_assistant",
+})
 
 # ---------------------------------------------------------------- 权限矩阵（v2.3 阶段 0：3 角色 × 5 MCP，CKDNutri P1–P5）
 
@@ -183,6 +198,9 @@ _PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_LIMITED,
         "demo_parent_assistant": ACCESS_LIMITED,
+        # child=RL（2026-08-21）：仅 get_patient_profile（P1_CHILD_READ_TOOLS 工具级
+        # 收窄，his._guard_access 强制；其余 P1 读工具一律 FORBIDDEN）
+        "child_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
     "CKDNutri-nutrition-mcp": {
@@ -190,10 +208,13 @@ _PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         #   + 按需求 P2 工具表（临床=✔）可写饮食日记 upsert_food_diary（2026-08-12 需求对齐）
         # parent=R/W：写饮食日记(upsert_food_diary) 且需回读日记摘要 —— 与 WRITE_TOOL_POLICY 一致
         # demo=R/W：演示家长等价（含写日记，免令牌）
+        # child=R/W（2026-08-21）：读食物 + 读日记摘要 + 写 child_foodlog(record_child_food)；
+        #   **upsert_food_diary 对 child 显式拒绝**（gate.enforce_nutrition_tool 工具级收口）
         # risk=-：风险引擎不读营养域
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_RW,
         "demo_parent_assistant": ACCESS_RW,
+        "child_assistant": ACCESS_RW,
         "risk_warning": ACCESS_NONE,
     },
     "CKDNutri-care-mcp": {
@@ -203,30 +224,36 @@ _PERMISSION_MATRIX: dict[str, dict[str, str]] = {
         # parent=R，ack_notification 未登记 WRITE_TOOL_POLICY 时回退矩阵 R 放行
         # 属"漏登记侥幸通过"，登记后矩阵必须同步为 RW 否则断言矛盾。
         # demo=R/W：演示家长等价（读通知 + 确认已读，免令牌）
+        # child=-（2026-08-21）：患儿身份不进随访/通知域（P3 不给）
         # risk=R/W：管线身份写通知（notify_* 系列由 WRITE_TOOL_POLICY 钳制为 {risk_warning}）
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_RW,
         "demo_parent_assistant": ACCESS_RW,
+        "child_assistant": ACCESS_NONE,
         "risk_warning": ACCESS_RW,
     },
     "CKDNutri-assessment-mcp": {
         # doctor=R：读 eGFR / 分期
         # parent=-：分期类问题由家庭助手读 M1 已确诊分期（MX-1），不暴露评估域
         # demo=-：演示家长同家长口径（MX-1 同样拦截，读 M1 已确诊分期）
+        # child=-（2026-08-21）：患儿身份不挂载评估域（P4 不给）
         # risk=R：风险引擎读分期
         "doctor_assistant": ACCESS_READ,
         "parent_assistant": ACCESS_NONE,
         "demo_parent_assistant": ACCESS_NONE,
+        "child_assistant": ACCESS_NONE,
         "risk_warning": ACCESS_READ,
     },
     "CKDNutri-content-mcp": {
         # doctor=R/W：报告生成 + push_to_emr 需 R/W 回查
         # parent=RL：受限报告视图
         # demo=RL：演示家长等价受限报告视图（CLINICIAN_ONLY_HIDDEN_FROM 含 demo）
+        # child=RL（2026-08-21）：同家长受限报告视图（CLINICIAN_ONLY_HIDDEN_FROM 加 child）
         # risk=R：风险引擎读报告上下文
         "doctor_assistant": ACCESS_RW,
         "parent_assistant": ACCESS_LIMITED,
         "demo_parent_assistant": ACCESS_LIMITED,
+        "child_assistant": ACCESS_LIMITED,
         "risk_warning": ACCESS_READ,
     },
 }
@@ -240,6 +267,7 @@ KNOWLEDGE_PROFILE: dict[str, str] = {
     "risk_warning": "full",
     "parent_assistant": "plain_language",
     "demo_parent_assistant": "plain_language",   # 演示家长：家长级通俗语料
+    "child_assistant": "plain_language",         # 患儿身份：通俗语料（儿童向）
 }
 
 # ---------------------------------------------------------------- MX-3 写权（v2.3 阶段 0：删 M11 两条 + 清理退役角色）
@@ -349,6 +377,16 @@ _WRITE_TOOL_POLICY: dict[str, WriteToolPolicy] = {
         "allowed": frozenset({"doctor_assistant"}),
         "requires_confirmation": False,
         "note": "签发监护人令牌（仅 doctor；内部 GUARDIAN_ISSUERS 双保险）",
+    },
+    # 2026-08-21：孩子自报食物记录（写 child_foodlog 表）——**仅患儿身份可写**；
+    # 家长/医生只读（经 get_food_diary_summary 双段输出），不可代改（参考数据不配进
+    # 医疗决策，家长不服自己记 food_diary）。工具级收口在 gate.enforce_nutrition_tool
+    # record_child_food 分支（allowed={child_assistant}，与登记一致）。
+    "record_child_food": {
+        "mcp": "CKDNutri-nutrition-mcp",
+        "allowed": frozenset({"child_assistant"}),
+        "requires_confirmation": False,
+        "note": "孩子自报饮食记录（child_foodlog），仅患儿身份可写，含积分（小肾侠段位）",
     },
 }
 # 值实际结构遵循 WriteToolPolicy（内层仍为 mappingproxy 只读代理，深冻结不变）
@@ -470,6 +508,9 @@ NUTRITION_ASSESSMENT_DATA_ROLES: frozenset[str] = frozenset({
     "parent_assistant",
     "demo_parent_assistant",
     "doctor_assistant",
+    # 2026-08-21：患儿身份可读日记摘要（get_food_diary_summary 双段输出；
+    # 写 food_diary 仍拒绝——见 gate.enforce_nutrition_tool upsert_food_diary 分支）
+    "child_assistant",
 })
 NUTRITION_ASSESSMENT_CLINICAL_TOOLS: frozenset[str] = frozenset({
     "calc_prnt_targets", "assess_intake_vs_target", "assess_pew_risk",

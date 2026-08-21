@@ -25,7 +25,7 @@ def _pkg_version() -> str:
 
 __version__ = _pkg_version()
 
-from .caller import as_caller, get_caller, set_caller
+from .caller import as_caller, get_caller, get_child_patient_id, set_caller
 from .errors import translate_error
 from .exceptions import CallerError, CallerUnknown, ConflictError, PermissionDenied
 from .gate import (
@@ -48,6 +48,8 @@ from .matrix import (
     ACCESS_RW,
     CALLERS,
     CHILD_FORBIDDEN_MCPS,
+    CHILD_PATIENT_ENV,
+    CHILD_ROLE,
     CLINICAL_CALC_MCP,
     CLINICIAN_ONLY_FIELDS,
     CLINICIAN_ONLY_HIDDEN_FROM,
@@ -78,6 +80,7 @@ from .matrix import (
     NUTRITION_ASSESSMENT_DATA_ROLES,
     NUTRITION_ASSESSMENT_DATA_TOOLS,
     NUTRITION_ASSESSMENT_WRITE_ALLOWED,
+    P1_CHILD_READ_TOOLS,
     P1_PARENT_HIDDEN_FIELDS,
     PARENT_EQUIVALENT_ROLES,
     PARENT_ROLE,
@@ -96,6 +99,8 @@ __all__ = [
     "ACCESS_RW",
     "CALLERS",
     "CHILD_FORBIDDEN_MCPS",
+    "CHILD_PATIENT_ENV",
+    "CHILD_ROLE",
     "CLINICAL_CALC_MCP",
     "CLINICIAN_ONLY_FIELDS",
     "CLINICIAN_ONLY_HIDDEN_FROM",
@@ -126,6 +131,7 @@ __all__ = [
     "NUTRITION_ASSESSMENT_DATA_ROLES",
     "NUTRITION_ASSESSMENT_DATA_TOOLS",
     "NUTRITION_ASSESSMENT_WRITE_ALLOWED",
+    "P1_CHILD_READ_TOOLS",
     "P1_PARENT_HIDDEN_FIELDS",
     "PARENT_EQUIVALENT_ROLES",
     "PARENT_ROLE",
@@ -147,6 +153,7 @@ __all__ = [
     "enforce_read",
     "enforce_write",
     "get_caller",
+    "get_child_patient_id",
     "is_write_action",
     "is_valid_escalation",
     "knowledge_profile",

@@ -23,6 +23,7 @@ from .exceptions import PermissionDenied
 from .matrix import (
     ACCESS_RW,
     CALLERS,
+    CHILD_ROLE,
     KNOWLEDGE_PROFILE,
     NUTRITION_ASSESSMENT_CLINICAL_ROLES,
     NUTRITION_ASSESSMENT_CLINICAL_TOOLS,
@@ -289,11 +290,27 @@ def enforce_nutrition_tool(caller: str, tool: str) -> str:
             caller, "CKDNutri-nutrition-mcp", tool, "caller 未登记")
     # 数据面·写：饮食日记写入家长/医生（与 MX-3 写权收口一致，单一事实源）
     if tool == "upsert_food_diary":
+        # 2026-08-21：患儿身份矩阵=RW 会被下方 WRITE_ALLOWED（_matrix_writers 派生）
+        # 放行，但 food_diary 是**医疗记录**（家长/医生记），孩子自报走 child_foodlog
+        # （record_child_food），不得写 food_diary——显式收口（fail-closed）。
+        if caller == CHILD_ROLE:
+            raise PermissionDenied(
+                caller, "CKDNutri-nutrition-mcp", tool,
+                "food_diary 是医疗记录，仅限家长/医生写入；"
+                "孩子自报请用 record_child_food（写入 child_foodlog）")
         if caller in NUTRITION_ASSESSMENT_WRITE_ALLOWED:
             return PERMISSION_MATRIX["CKDNutri-nutrition-mcp"][caller]
         raise PermissionDenied(
             caller, "CKDNutri-nutrition-mcp", tool,
             "饮食日记写入仅限家长/医生")
+    # 数据面·写（2026-08-21）：孩子自报食物记录——仅患儿身份可写（child_foodlog 表）。
+    # 与 WRITE_TOOL_POLICY["record_child_food"].allowed={child_assistant} 一致（双保险）。
+    if tool == "record_child_food":
+        if caller == CHILD_ROLE:
+            return PERMISSION_MATRIX["CKDNutri-nutrition-mcp"][caller]
+        raise PermissionDenied(
+            caller, "CKDNutri-nutrition-mcp", tool,
+            "孩子自报饮食记录（child_foodlog）仅限患儿身份写入；家长/医生只读")
     # 数据面·读：日记摘要家长/患儿/临床角色可读
     if tool in NUTRITION_ASSESSMENT_DATA_TOOLS:
         if caller in NUTRITION_ASSESSMENT_DATA_ROLES:

@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from .exceptions import CallerUnknown
-from .matrix import CALLERS
+from .matrix import CALLERS, CHILD_PATIENT_ENV
 
 ENV_KEY = "A207_CALLER"
 # P0-2 修复（2026-08-13）+ N-SEC-1 修复（2026-08-14）：生产环境守卫——
@@ -81,6 +81,23 @@ def set_caller(value: str | None) -> None:
         os.environ.pop(ENV_KEY, None)
     else:
         os.environ[ENV_KEY] = value
+
+
+def get_child_patient_id() -> str:
+    """返回 child_assistant 绑定的患儿编号（env A207_CHILD_PATIENT_ID，部署注入）。
+
+    患儿身份（2026-08-21）单实例**绑单患儿**（如 P0020）：所有按患儿的读写范围
+    钉死该患儿。缺失/空 → 抛 CallerUnknown（fail-closed：child 无绑定即拒绝，
+    患儿编号由部署配置注入，模型不可自证——与 A207_CALLER 同模式）。
+    仅 child_assistant 身份的分支使用；其他角色调用会读到自身进程 env（无意义，
+    各包 _guard_guardian 仅在 caller==CHILD_ROLE 时走绑定分支）。
+    """
+    value = (os.environ.get(CHILD_PATIENT_ENV) or "").strip()
+    if not value:
+        raise CallerUnknown(
+            f"child_assistant 未绑定患儿：环境变量 {CHILD_PATIENT_ENV} 缺失或为空。"
+            f"服务端必须由部署配置注入 child 绑定的患儿编号（P0-1：模型不可自证患儿）。")
+    return value
 
 
 @contextmanager
