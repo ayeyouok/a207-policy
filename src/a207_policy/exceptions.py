@@ -62,10 +62,19 @@ class ConflictError(Exception):
 try:
     import a207_policy as _global_policy  # 全局 a207_policy（若存在）
 
-    CallerError = _global_policy.CallerError
-    CallerUnknown = _global_policy.CallerUnknown
-    PermissionDenied = _global_policy.PermissionDenied
-    ConflictError = _global_policy.ConflictError
+    # L2 修复（2026-08-21）：仅当全局包**完整初始化**才重定向（hasattr 判据）。
+    # 顶层首次导入时 __init__ 正在初始化本模块，此刻 `import a207_policy` 拿到的是
+    # 部分初始化模块，_global_policy.CallerError 尚未绑定 → 直接属性访问必抛
+    # AttributeError，重定向必然失败，且每次首次导入都打印误导性
+    # "circular import" warning（实为自引用顺序，非循环导入）。hasattr=False 时
+    # 静默保留本地副本，语义与现状一致（全局包暴露的即本地副本类），但不产生噪音。
+    # 完整初始化后 hasattr=True（如随包内置 _policy 副本在全局包已导入后加载），
+    # 重定向保证「全局包 / 内置 _policy」两形态抛同一类对象。
+    if hasattr(_global_policy, "CallerError"):
+        CallerError = _global_policy.CallerError
+        CallerUnknown = _global_policy.CallerUnknown
+        PermissionDenied = _global_policy.PermissionDenied
+        ConflictError = _global_policy.ConflictError
 except (ImportError, AttributeError) as _exc:
     # L2（2026-08-16，第七轮审查）：全局包不可用 → 保留本地副本（隔离部署自洽）；
     # 仅捕获 ImportError/AttributeError（此前裸 except Exception 会把 ImportError
