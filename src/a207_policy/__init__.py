@@ -40,6 +40,7 @@ from .gate import (
     validate_patient_id,
     verify_guardian_token,
 )
+from .levels import RISK_LEVEL_RANK, is_valid_escalation
 from .matrix import (
     ACCESS_LIMITED,
     ACCESS_NONE,
@@ -129,6 +130,7 @@ __all__ = [
     "PARENT_EQUIVALENT_ROLES",
     "PARENT_ROLE",
     "PERMISSION_MATRIX",
+    "RISK_LEVEL_RANK",
     "WRITE_TOOL_ALIASES",
     "WRITE_TOOL_POLICY",
     "_MATRIX_EXEMPT_WRITE_TOOLS",
@@ -146,6 +148,7 @@ __all__ = [
     "enforce_write",
     "get_caller",
     "is_write_action",
+    "is_valid_escalation",
     "knowledge_profile",
     "normalize_mcp",
     "resolve_access",
