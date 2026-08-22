@@ -126,11 +126,13 @@ from tablestore import (  # noqa: E402
     OTSClientError,
     OTSError,
     OTSServiceError,
+    RowExistenceExpectation,
     SingleColumnCondition,
 )
 
 from a207_policy.storage import (  # noqa: E402
     TablestoreBase,
+    _merge_row,
     is_condition_conflict,
 )
 
@@ -283,9 +285,15 @@ def test_bug70_backfill_rev_preserves_business_columns():
             self.update_calls += 1
             key = tuple(v for _, v in row.primary_key)
             attrs = dict(self.current_row)
-            for col in row.attribute_columns:
-                # 三元组 (name, op, value)
-                attrs[col[0]] = col[2]
+            ac = row.attribute_columns
+            if isinstance(ac, dict):
+                # 真实 SDK UpdateRow 格式：{'PUT': [(name, value), ...], ...}
+                for op_cols in ac.values():
+                    for col in op_cols:
+                        attrs[col[0]] = col[1]  # col = (name, value) 或 (name, value, ts)
+            else:  # 兼容旧 list 三元组（理论不再出现）
+                for col in ac:
+                    attrs[col[0]] = col[2]
             self.current_row = attrs
 
         def put_row(self, table, row, condition):
@@ -319,6 +327,114 @@ def test_bug70_backfill_rev_preserves_business_columns():
     print("  [ok] 历史行补列走 update_row，业务列全保留（total_points=5/_rev=1/entries 完好）")
 
 
+def test_bug71_backfill_rev_row_format_and_condition():
+    """BUG-71 + 并发安全（Issue 3）：_update_row_add_rev 必须传 dict 格式且带列条件。
+
+    此前写为 Row(pk, [(...UpdateType.PUT, 0)])（列表）——真实 SDK update_row 内部走
+    `row.attribute_columns.items()`，列表无 .items() → AttributeError 崩溃（仅历史行
+    首次更新触发）。修复后应为 dict {'PUT': [('_rev', 0)]}。同时补列条件必须拒绝 _rev
+    已存在（SingleColumnCondition(_rev, 0, EQUAL, pass_if_missing=True)），否则并发两
+    线程同时补列会把 _rev 洗回 0（Lost Update）。
+    """
+    class _CaptureUpdateClient:
+        def __init__(self):
+            self.captured_row = None
+            self.captured_condition = None
+
+        def update_row(self, table, row, condition=None):
+            self.captured_row = row
+            self.captured_condition = condition
+
+        def get_row(self, *a, **k):
+            return (None, None, None)
+
+    client = _CaptureUpdateClient()
+    base = TablestoreBase(client=client)
+    base._update_row_add_rev("t", [("patient_id", "P0020")])
+
+    row = client.captured_row
+    cond = client.captured_condition
+    # BUG-71：attribute_columns 必须是 dict（真实 SDK 要求），不能是 list
+    assert isinstance(row.attribute_columns, dict), \
+        f"UpdateRow attribute_columns 必须是 dict，实际 {type(row.attribute_columns)}"
+    assert row.attribute_columns == {'PUT': [('_rev', 0)]}, \
+        f"UpdateRow 列格式错误: {row.attribute_columns}"
+    # 行存在性条件
+    assert cond.row_existence_expectation == RowExistenceExpectation.EXPECT_EXIST
+    # 并发安全：拒绝 _rev 已存在（Issue 3）
+    cc = cond.column_condition
+    assert isinstance(cc, SingleColumnCondition), f"补列必须带列条件，实际 {cc!r}"
+    assert cc.column_name == "_rev", cc.column_name
+    assert cc.column_value == 0, cc.column_value
+    assert cc.comparator == ComparatorType.EQUAL, cc.comparator
+    assert cc.pass_if_missing is True, "缺失列须放行（首补列），已存在须拦截"
+    print("  [ok] 补列 UpdateRow dict 格式正确 + _rev 存在性列条件（并发安全）")
+
+
+def test_bug72_backfill_rev_deadloop_guard():
+    """BUG-72：补列写回对读不可见时必须有封顶，拒绝 CPU 死循环。
+
+    Fake client 的 update_row **不**把 _rev 写回 current_row（模拟 DB 同步延迟/
+    缓存/测试 Fake 未写回），_get_row 永远读不到 _rev → 旧实现 attempts 不增死循环。
+    修复后 init_attempts 独立封顶（_MAX_RETRY），超阈抛 RuntimeError。
+    """
+    class _NoWritebackClient(_CaptureClient):
+        def update_row(self, table, row, condition=None):
+            # 故意不写回 _rev：模拟补列写回对读不可见
+            self.update_calls = getattr(self, "update_calls", 0) + 1
+
+    client = _NoWritebackClient(current_row={"entries": "[]"})  # 无 _rev
+    base = TablestoreBase(client=client)
+    raised = False
+    try:
+        base._save_row_locked(
+            "t", [("patient_id", "P0020")], {"entries": "[]", "total_points": 5})
+    except RuntimeError as exc:
+        raised = True
+        assert "补列失败" in str(exc), f"应抛补列失败，实际: {exc}"
+    assert raised, "补列写回不可见必须抛 RuntimeError（而非死循环）"
+    # 终止性：补列次数应被封顶（不超过 _MAX_RETRY + 1），绝不无限
+    assert client.update_calls <= base._MAX_RETRY + 1, \
+        f"补列次数未被封顶，疑似死循环: {client.update_calls}"
+    assert client.update_calls >= base._MAX_RETRY, \
+        f"应耗尽补列预算后抛错，实际仅 {client.update_calls} 次"
+    print(f"  [ok] 补列写回不可见时第 {client.update_calls} 次抛 RuntimeError（无死循环）")
+
+
+def test_bug73_merge_row_invalid_new_json_rejected():
+    """BUG-73：已注册 JSON list 字段，新值非法 JSON / 非数组必须 fail-closed 拒绝。
+
+    旧实现只校验 cur，value 非法被 `except ... pass` 吞掉后 `merged[key]=value` 静默
+    覆盖，破坏"该字段必为 JSON 数组"契约。修复后两端都校验。
+    """
+    from a207_policy import storage as _storage_mod
+
+    _storage_mod._JSON_LIST_FIELDS.add("records")  # 注册（幂等）
+    try:
+        # 新值非法 JSON（如 "{invalid}"）→ 必须拒绝
+        try:
+            _merge_row({"records": '[{"id": "r1"}]'},
+                       {"records": "{invalid}"})
+            raise AssertionError("新值非法 JSON 应被拒绝覆盖")
+        except RuntimeError:
+            pass
+        # 新值合法 JSON 但非数组（如 "42" / '"hello"'）→ 必须拒绝
+        for bad_new in ("42", '"hello"', "{}"):
+            try:
+                _merge_row({"records": '[{"id": "r1"}]'},
+                           {"records": bad_new})
+                raise AssertionError(f"新值 {bad_new!r} 非数组应被拒绝覆盖")
+            except RuntimeError:
+                pass
+        # 合法 list 新值仍正常合并（正例不回归）
+        out = _merge_row({"records": '[{"id": "r1"}]'},
+                         {"records": '[{"id": "r2"}]'})
+        assert '"r1"' in out["records"] and '"r2"' in out["records"], out
+    finally:
+        _storage_mod._JSON_LIST_FIELDS.discard("records")
+    print("  [ok] 新值非法 JSON / 非数组均被拒绝（fail-closed），合法合并不回归")
+
+
 def main():
     print("BUG-69 回归（storage 条件写参数顺序 + OTSError 捕获）+ BUG-70（补列 UpdateRow）")
     test_bug69_condition_argument_order()
@@ -326,7 +442,10 @@ def main():
     test_bug69_otsserviceerror_nonconflict_raises()
     test_bug69_is_condition_conflict_covers_both()
     test_bug70_backfill_rev_preserves_business_columns()
-    print("BUG69/70 OK（5 用例）")
+    test_bug71_backfill_rev_row_format_and_condition()
+    test_bug72_backfill_rev_deadloop_guard()
+    test_bug73_merge_row_invalid_new_json_rejected()
+    print("BUG69/70/71/72/73 OK（8 用例）")
 
 
 if __name__ == "__main__":

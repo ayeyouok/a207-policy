@@ -146,20 +146,46 @@ def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
         if _mono is not None and isinstance(value, str) and isinstance(cur_value, str):
             if cur_value in _mono and value in _mono and _mono[value] < _mono[cur_value]:
                 continue  # stale 低阶状态 → 保留 current 高阶状态
-        # 审查（2026-08-19，care BUG-4）：已注册 JSON list 字段，旧值损坏/非 list →
-        # 拒绝合并（fail-closed，不静默覆盖损坏数据）。未注册字段维持原行为。
-        if key in _JSON_LIST_FIELDS and isinstance(cur_value, str):
+        # 已注册 JSON list 字段（care BUG-4 / BUG-73，2026-08-22）：fail-closed 双向
+        # 校验——cur 与 value 都必须是合法 JSON 数组字符串，任一非法即拒绝覆盖，交由
+        # 运维/业务层修复（严禁污染"该字段必为 JSON 数组"契约）。旧实现只校验 cur，
+        # value 非法被 `except ... pass` 吞掉后 `merged[key]=value` 静默覆盖（BUG-73），
+        # 破坏契约。非注册字段维持原行为（容忍非 JSON）。
+        if key in _JSON_LIST_FIELDS:
+            # 新值校验（BUG-73 修复）
+            if not isinstance(value, str):
+                raise RuntimeError(
+                    f"字段 {key} 新值类型错误（期望 JSON 数组字符串，实际 "
+                    f"{type(value).__name__}）：拒绝覆盖，请检查业务层序列化")
             try:
-                _cur_parsed = json.loads(cur_value)
+                new_list = json.loads(value)
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
-                    f"字段 {key} 存储值损坏（非法 JSON）：拒绝覆盖，"
-                    "请人工修复 Tablestore 该行数据") from exc
-            if not isinstance(_cur_parsed, list):
+                    f"字段 {key} 新值损坏（非法 JSON）：拒绝覆盖，"
+                    "请检查业务层序列化（勿污染 JSON list 字段）") from exc
+            if not isinstance(new_list, list):
                 raise RuntimeError(
-                    f"字段 {key} 存储值类型错误（期望 JSON 数组，实际 "
-                    f"{type(_cur_parsed).__name__}）：拒绝覆盖，请人工修复存储行")
-        # 两端都是 JSON 数组字符串 → 反序列化按 id 去重合并
+                    f"字段 {key} 新值类型错误（期望 JSON 数组，实际 "
+                    f"{type(new_list).__name__}）：拒绝覆盖，请检查业务层序列化")
+            # 旧值校验（care BUG-4，保留）
+            if isinstance(cur_value, str):
+                try:
+                    cur_list = json.loads(cur_value)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"字段 {key} 存储值损坏（非法 JSON）：拒绝覆盖，"
+                        "请人工修复 Tablestore 该行数据") from exc
+                if not isinstance(cur_list, list):
+                    raise RuntimeError(
+                        f"字段 {key} 存储值类型错误（期望 JSON 数组，实际 "
+                        f"{type(cur_list).__name__}）：拒绝覆盖，请人工修复存储行")
+                merged[key] = json.dumps(
+                    _merge_lists(cur_list, new_list), ensure_ascii=False)
+                continue
+            # cur 缺失/非 str（历史首次写该字段）→ 直接用已校验的新值
+            merged[key] = value
+            continue
+        # 非注册字段：两端都是 JSON 数组字符串才按 id 去重合并，否则普通覆盖
         if isinstance(cur_value, str) and isinstance(value, str):
             try:
                 cur_list = json.loads(cur_value)
@@ -310,16 +336,29 @@ class TablestoreBase:
         :param pk: 主键（[(列名, 值), ...]）
         """
         from tablestore import (
+            ComparatorType,
             Condition,
             Row,
             RowExistenceExpectation,
-            UpdateType,
+            SingleColumnCondition,
         )
 
-        # Row(pk, [(列名, UpdateType.PUT, 值), ...])——UpdateRow 的属性列三元组
-        row = Row(pk, [(self._REV_COL, UpdateType.PUT, 0)])
-        # 行存在性条件：目标行必须存在（历史行补列场景），缺行即失败不误建空行
-        condition = Condition(RowExistenceExpectation.EXPECT_EXIST)
+        # BUG-71 修复（2026-08-22）：UpdateRow 的 attribute_columns 必须传 **dict**
+        # 结构 {'PUT': [(列名, 值), ...]}，不能像 PutRow 那样传 tuple 列表。
+        # 此前写成 Row(pk, [(self._REV_COL, UpdateType.PUT, 0)])（列表）——
+        # 真实 SDK 内部对 update_row 走 `row.attribute_columns.items()`，列表无
+        # .items() → AttributeError: 'list' object has no attribute 'items' 直接崩溃
+        # （仅对无 _REV_COL 的历史行首次更新时触发，故此前未被发现）。
+        row = Row(pk, {'PUT': [(self._REV_COL, 0)]})
+        # 行存在性条件：目标行必须存在（历史行补列场景），缺行即失败不误建空行。
+        # 审查（2026-08-22）并发安全：补列条件必须 **拒绝 _rev 已存在**——否则并发两
+        # 线程同时读到无 _REV_COL 的历史行，A 补列并 CAS 到 _rev=1 后，B 的补列会无
+        # 条件把 _rev 洗回 0（无列条件拦截），B 随后顺利覆盖写入 → Lost Update。
+        # 列条件 _rev==0 OR _rev 缺失(pass_if_missing) 才放行；_rev>=1（已 CAS）即
+        # ConditionCheckFail，由 _save_row_locked 捕获后重新读取走正常 CAS。
+        col_cond = SingleColumnCondition(
+            self._REV_COL, 0, ComparatorType.EQUAL, pass_if_missing=True)
+        condition = Condition(RowExistenceExpectation.EXPECT_EXIST, col_cond)
         # update_row 直接收 Row 对象（UpdateRowItem 是 BatchWriteRow 用的包装）
         self._get_client().update_row(table, row, condition)
 
@@ -342,7 +381,12 @@ class TablestoreBase:
         # 补列上，最终抛 ConflictError 且 last_err=None（误导性"并发写冲突"）。
         # 补列成功即进入正常 CAS；用 while 循环保证"至少一次 CAS 尝试"——
         # 补列本身幂等（force=True），重复补列无害。
-        attempts = 0
+        attempts = 0  # CAS 重试预算（补列不消耗）
+        # BUG-72 修复（2026-08-22）：补列独立计数上限——此前补列 `continue` 不增
+        # attempts，若补列写回对读不可见（DB 同步延迟 / 缓存 / 测试 Fake 未写回），
+        # attempts 永远为 0 → while 死循环 CPU 100%。改用 init_attempts 单独封顶，
+        # 超阈抛 RuntimeError（fail-closed，拒绝无限重试）。
+        init_attempts = 0
         while attempts < self._MAX_RETRY:
             current = self._get_row(table, pk)
             rev = int(current.get(self._REV_COL, 0)) if current else 0
@@ -361,15 +405,24 @@ class TablestoreBase:
                 # 只写 {_rev: 0} 幂等无害（业务列不动）；随后 continue 重新读取
                 # （行已带 _rev=0），走正常 CAS（_rev==0 条件写，合并并发修改）。
                 if self._REV_COL not in current:
-                    # BUG-70 修复（2026-08-22）：补列从 PutRow 改为 **UpdateRow 增量写**。
-                    # 此前走 _put_row_conditioned（内部 SDK put_row = PutRow API，**整行
-                    # 覆盖写**）只传 {_REV_COL: 0}——Tablestore PutRow 会删除该行所有
-                    # 未在请求中出现的属性列，仅保留 _rev=0，**业务数据（entries/points
-                    # 等）全部丢失**（注释"业务列不动"是误把 PutRow 当 UpdateRow）。
-                    # 触发条件：2026-08-13 乐观锁上线前落库的历史行（无 _REV_COL），
-                    # 首次更新即清空。改用 UpdateRow 增量添加 _rev 列（PUT 语义），
-                    # 其他属性列不受影响；行存在性条件仍保留（EXPECT_EXIST）。
-                    self._update_row_add_rev(table, pk)
+                    # BUG-70 修复（2026-08-22）：补列从 PutRow 改为 **UpdateRow 增量写**，
+                    # 仅添加 _rev 列，业务列不动（实现见 _update_row_add_rev）。
+                    # BUG-72 修复（2026-08-22）：补列写回不可见时须有封顶，否则死循环；
+                    # 超阈抛错而非无限重试。补列条件冲突（并发线程已补列）也须重新读取
+                    # 走正常 CAS，不得冒泡崩溃。
+                    if init_attempts >= self._MAX_RETRY:
+                        raise RuntimeError(
+                            f"历史行补列失败（{table} pk={pk}）：已重试 "
+                            f"{init_attempts} 次仍读不到 {self._REV_COL} 列，"
+                            "疑似存储写回异常，拒绝无限重试（CPU 死循环）")
+                    init_attempts += 1
+                    try:
+                        self._update_row_add_rev(table, pk)
+                    except OTSError as exc:
+                        # 并发安全的补列条件（_rev>=1 时 ConditionCheckFail）：说明其他
+                        # 线程已补列 → 行已带 _rev，重新读取走正常 CAS（不消耗 CAS 预算）。
+                        if not is_condition_conflict(exc):
+                            raise  # 真实 SDK 错误（鉴权/表不存在等）立即抛
                     continue
             next_attrs[self._REV_COL] = rev + 1
             attempts += 1  # 仅正常 CAS 尝试消耗预算（补列不占）
