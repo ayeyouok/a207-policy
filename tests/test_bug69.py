@@ -13,9 +13,13 @@
 本测试用 Fake client 捕获条件对象断言参数语义；并验证 OTSServiceError 条件冲突
 进入重试、非冲突错误继续抛出。零 pytest 依赖（直接运行模式，CI 逐文件 python 跑）。
 
-CI 兼容（2026-08-22）：a207-policy 的 publish.yml 只跑 `python tests/test_*.py`、
-**不安装任何依赖**（pyproject 无 tablestore）——SDK 缺失时用本地 Fake 等价类回退
-（与 clinical-data tests/harness.py 同模式），测试在无 SDK 的 CI 环境同样可跑。
+CI 兼容（2026-08-22 二次修复）：a207-policy 的 publish.yml 只跑 `python tests/test_*.py`、
+**不安装任何依赖**（pyproject 无 tablestore）。storage.py **函数内**也有延迟
+`from tablestore import ...`（_put_row_conditioned/_get_client/_save_row_locked 等），
+测试真实调用这些方法时若无 SDK 仍会 ModuleNotFoundError——因此 SDK 缺失时**注入
+完整 Fake tablestore 模块到 sys.modules**（等价类，含 Condition/Row/RowExistence
+Expectation/UpdateType/ComparatorType/异常体系），storage 函数内 import 拿到的是
+Fake 模块。验证用 `python -S`（不加载 site-packages）模拟 CI 无 SDK 环境。
 """
 import json
 import os
@@ -25,26 +29,23 @@ os.environ.setdefault("A207_ENV", "test")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from a207_policy.storage import (  # noqa: E402
-    TablestoreBase,
-    is_condition_conflict,
-)
-
-# ---- SDK 可选导入（CI 无 tablestore 时回退本地等价类）----
+# ---- SDK 可选导入：缺失时注入 Fake tablestore 模块（storage 函数内延迟 import 需要）----
 try:
-    from tablestore import (  # noqa: F401
-        ComparatorType,
-        OTSClientError,
-        OTSError,
-        OTSServiceError,
-        SingleColumnCondition,
-    )
+    import tablestore  # noqa: F401
+    _HAS_SDK = True
 except ImportError:  # pragma: no cover - 仅无 SDK 的 CI 环境
-    class OTSError(Exception):  # noqa: E999
+    _HAS_SDK = False
+    import types as _types
+
+    class OTSError(Exception):
         pass
 
     class OTSClientError(OTSError):
-        pass
+        def __init__(self, message, http_status=None):
+            # 模拟真实 SDK：message 属性供 is_condition_conflict 读取
+            super().__init__(message)
+            self.message = message
+            self.http_status = http_status
 
     class OTSServiceError(OTSError):
         def __init__(self, status, code, message, request_id):
@@ -69,6 +70,69 @@ except ImportError:  # pragma: no cover - 仅无 SDK 的 CI 环境
             self.comparator = comparator
             self.pass_if_missing = pass_if_missing
             self.latest_version_only = latest_version_only
+
+    class RowExistenceExpectation:
+        IGNORE = "IGNORE"
+        EXPECT_EXIST = "EXPECT_EXIST"
+        EXPECT_NOT_EXIST = "EXPECT_NOT_EXIST"
+
+    class Condition:
+        def __init__(self, row_existence_expectation, column_condition=None):
+            self.row_existence_expectation = row_existence_expectation
+            self.column_condition = column_condition
+
+    class Row:
+        def __init__(self, primary_key, attribute_columns=None):
+            self.primary_key = primary_key
+            self.attribute_columns = attribute_columns or []
+
+    class UpdateType:
+        PUT = "PUT"
+        DELETE = "DELETE"
+        DELETE_ALL = "DELETE_ALL"
+        INCREMENT = "INCREMENT"
+
+    class UpdateRowItem:
+        def __init__(self, row, condition, return_type=None):
+            self.row = row
+            self.condition = condition
+
+    class OTSClient:  # pragma: no cover - 测试注入 client，不真连
+        def __init__(self, *a, **k):
+            raise AssertionError("测试不应构造真实 OTSClient（注入 Fake client）")
+
+    INF_MAX = object()
+    INF_MIN = object()
+
+    _fake = _types.ModuleType("tablestore")
+    _fake.OTSError = OTSError
+    _fake.OTSClientError = OTSClientError
+    _fake.OTSServiceError = OTSServiceError
+    _fake.ComparatorType = ComparatorType
+    _fake.SingleColumnCondition = SingleColumnCondition
+    _fake.RowExistenceExpectation = RowExistenceExpectation
+    _fake.Condition = Condition
+    _fake.Row = Row
+    _fake.UpdateType = UpdateType
+    _fake.UpdateRowItem = UpdateRowItem
+    _fake.OTSClient = OTSClient
+    _fake.INF_MAX = INF_MAX
+    _fake.INF_MIN = INF_MIN
+    sys.modules["tablestore"] = _fake
+
+# 从（真或 Fake）tablestore 取符号供本测试断言使用
+from tablestore import (  # noqa: E402
+    ComparatorType,
+    OTSClientError,
+    OTSError,
+    OTSServiceError,
+    SingleColumnCondition,
+)
+
+from a207_policy.storage import (  # noqa: E402
+    TablestoreBase,
+    is_condition_conflict,
+)
 
 
 class _FakeRow:
