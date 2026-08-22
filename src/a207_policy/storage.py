@@ -115,9 +115,19 @@ def is_condition_conflict(exc: Any) -> bool:
     网络/超时等）是环境/配置问题，必须继续抛出让上层定位，**不得误判为 DUPLICATE
     或并发冲突**。_save_row_locked 与 care 的 save_notification_expect_not_exist 共用。
     """
-    code = str(getattr(exc, "code", "") or "")
-    msg = str(getattr(exc, "message", "") or "")
-    return "ConditionCheck" in code or "ConditionCheck" in msg or "not match" in msg.lower()
+    code = str(getattr(exc, "code", "") or "").lower()
+    msg = str(getattr(exc, "message", "") or "").lower()
+    # 修复（2026-08-22 深夜，外部审计 claim4）：原匹配大小写敏感且不含空格
+    # （"ConditionCheck"），无法命中真实 Tablestore 服务端消息
+    # "Condition check failed."（小写 + 空格）；当 code 为空、仅 message 携带
+    # 冲突信息时漏判 → 条件冲突被当系统异常冒泡、错失乐观锁重试。改为大小写
+    # 不敏感 + 兼容 "condition check"（带空格）格式。
+    return (
+        "conditioncheck" in code
+        or "conditioncheck" in msg
+        or "condition check" in msg
+        or "not match" in msg
+    )
 
 
 def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
@@ -140,6 +150,13 @@ def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """
     merged = dict(current)
     for key, value in new.items():
+        # 修复（2026-08-22 深夜，外部审计 claim2）：契约（docstring）"new 非 None
+        # 字段覆盖"——None 表示**不改动该字段**，必须跳过（保留 current），
+        # 不可写入。此前未跳过：(a) 注册 JSON-list 字段遇 None 触发 RuntimeError
+        # 中断更新；(b) 普通字段 merged[key]=None 经 _put_row_conditioned 的
+        # clean 剔除后，PutRow 整行覆盖会把该列在服务端永久删除（数据丢失）。
+        if value is None:
+            continue
         cur_value = merged.get(key)
         # 单调字段：冲突合并取高序值（防状态机回退）
         _mono = _MONOTONIC_FIELDS.get(key)
@@ -316,8 +333,14 @@ class TablestoreBase:
             # → 第 5 次行更新必 ConditionCheckFail → OTSServiceError → NUTR_UNKNOWN**
             # （用户实测：昨天写 4 次成功、今天第 5 次写失败）。正确传参为
             # column_value=rev、comparator=ComparatorType.EQUAL。
+            # 修复（2026-08-22 深夜，外部审计 claim1）：CAS 列条件必须
+            # pass_if_missing=False——SDK SingleColumnCondition **默认
+            # pass_if_missing=True**，缺列时条件**成立（放行）**，会让缺
+            # _REV_COL 的退化行绕过乐观锁被无条件覆写。置 False 使缺列即
+            # ConditionCheckFail（fail-closed）。正常流程行必带 _REV_COL
+            # （_save_row_locked 已先行补列），故不影响既有 CAS 语义。
             col_cond = SingleColumnCondition(
-                self._REV_COL, rev, ComparatorType.EQUAL)
+                self._REV_COL, rev, ComparatorType.EQUAL, pass_if_missing=False)
         condition = Condition(expectation, col_cond)
         clean = {k: v for k, v in attrs.items() if v is not None}
         row = Row(pk, list(clean.items()))
@@ -412,7 +435,7 @@ class TablestoreBase:
                     # 走正常 CAS，不得冒泡崩溃。
                     if init_attempts >= self._MAX_RETRY:
                         raise RuntimeError(
-                            f"历史行补列失败（{table} pk={pk}）：已重试 "
+                            f"历史行补列失败（{table} pk={_mask_pk(pk)}）：已重试 "
                             f"{init_attempts} 次仍读不到 {self._REV_COL} 列，"
                             "疑似存储写回异常，拒绝无限重试（CPU 死循环）")
                     init_attempts += 1
@@ -448,7 +471,7 @@ class TablestoreBase:
         # 编排层无法区分"服务端坏了" vs "业务冲突（可重试/人工合并）"。
         # 统一抛 ConflictError → translate_error 显式映射 CONFLICT 信封（三包共享）。
         raise ConflictError(
-            f"存储并发写冲突（{table} pk={pk}），重试 {self._MAX_RETRY} 次仍失败，"
+            f"存储并发写冲突（{table} pk={_mask_pk(pk)}），重试 {self._MAX_RETRY} 次仍失败，"
             f"拒绝静默覆盖: {last_err}")
 
     # ---- 全表 GetRange ----

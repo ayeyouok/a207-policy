@@ -135,6 +135,7 @@ from a207_policy.storage import (  # noqa: E402
     _merge_row,
     is_condition_conflict,
 )
+from a207_policy.exceptions import ConflictError  # noqa: E402  # claim5 断言
 
 
 class _FakeRow:
@@ -435,8 +436,102 @@ def test_bug73_merge_row_invalid_new_json_rejected():
     print("  [ok] 新值非法 JSON / 非数组均被拒绝（fail-closed），合法合并不回归")
 
 
+def test_claim1_cas_pass_if_missing_false():
+    """外部审计 claim1：_put_row_conditioned 的 CAS 列条件必须 pass_if_missing=False
+    （fail-closed）——缺 _REV_COL 的退化行不得绕过乐观锁被无条件覆写。"""
+    client = _CaptureClient(current_row={"_rev": 4, "entries": "[]"})
+    _call_put_row_conditioned(client, rev=4, expect_exists=True)
+    cond = client.captured_conditions[-1]
+    cc = cond.column_condition
+    assert isinstance(cc, SingleColumnCondition)
+    assert cc.pass_if_missing is False, (
+        f"CAS 条件必须 pass_if_missing=False（防缺列绕过乐观锁），"
+        f"实际 {cc.pass_if_missing}")
+    print("  [ok] CAS 列条件 pass_if_missing=False（fail-closed，缺列即 ConditionCheckFail）")
+
+
+def test_claim2_merge_row_none_skipped():
+    """外部审计 claim2：_merge_row 契约"new 非 None 字段覆盖"——None 必须跳过，
+    保留 current，不报错、不写 None（避免 PutRow 整行覆盖删列数据丢失）。"""
+    from a207_policy import storage as _storage_mod
+
+    _storage_mod._JSON_LIST_FIELDS.add("records")
+    try:
+        # 注册 JSON 字段遇 None：旧实现抛 RuntimeError 中断；修复后跳过保留 current
+        out = _merge_row(
+            {"records": '[{"id":"r1"}]', "name": "old"},
+            {"records": None, "name": None})
+        assert out["records"] == '[{"id":"r1"}]', f"None 应跳过保留 current: {out}"
+        assert out["name"] == "old", f"普通字段 None 应跳过保留 current: {out}"
+        # 非 None 正常覆盖（正例不回归）
+        out2 = _merge_row({"name": "old"}, {"name": "new"})
+        assert out2["name"] == "new", out2
+    finally:
+        _storage_mod._JSON_LIST_FIELDS.discard("records")
+    print("  [ok] _merge_row 遇 None 跳过（保留 current，不抛错不写 None）")
+
+
+def test_claim4_condition_conflict_lowercase_space():
+    """外部审计 claim4：is_condition_conflict 必须命中真实服务端消息
+    "Condition check failed."（小写 + 空格），且不误判非冲突错误。"""
+    # 真实 Tablestore 服务端条件冲突消息（小写 + 空格），code 可能为空
+    assert is_condition_conflict(OTSClientError("Condition check failed.")) is True
+    # 仅 message 携带冲突（code 为空）也须命中
+    assert is_condition_conflict(OTSServiceError(
+        None, "", "Condition check failed.", "r")) is True
+    # 非冲突不得误判
+    assert is_condition_conflict(OTSClientError("connection reset")) is False
+    assert is_condition_conflict(OTSServiceError(
+        403, "OTSAuthFailed", "Access denied", "r")) is False
+    print("  [ok] is_condition_conflict 命中 \"condition check failed.\"（小写+空格），非冲突不误判")
+
+
+def test_claim5_masked_pk_in_exceptions():
+    """外部审计 claim5：_save_row_locked 异常消息必须脱敏 pk（_mask_pk），
+    不得落明文 patient_id（医疗合规）。覆盖并发冲突与补列失败两条路径。"""
+    # 路径1：并发写冲突 → ConflictError（pk 脱敏）
+    class _AlwaysConflictClient(_CaptureClient):
+        def put_row(self, table, row, condition):
+            self.put_calls += 1
+            raise OTSServiceError(
+                400, "OTSConditionCheckFail", "Condition check failed", "r")
+
+    c1 = _AlwaysConflictClient(current_row={"_rev": 4, "entries": "[]"})
+    base = TablestoreBase(client=c1)
+    raised = False
+    try:
+        base._save_row_locked(
+            "t", [("patient_id", "P0020")], {"entries": "[]"})
+    except ConflictError as exc:
+        raised = True
+        msg = str(exc)
+        assert "P0020" not in msg, f"明文 patient_id 泄漏: {msg}"
+        assert "P002***" in msg, f"未脱敏: {msg}"
+    assert raised, "并发冲突应抛 ConflictError"
+
+    # 路径2：历史行补列写回不可见 → RuntimeError 补列失败（pk 脱敏）
+    class _NoWritebackClient2(_CaptureClient):
+        def update_row(self, table, row, condition=None):
+            self.update_calls = getattr(self, "update_calls", 0) + 1
+
+    c2 = _NoWritebackClient2(current_row={"entries": "[]"})  # 无 _rev
+    base2 = TablestoreBase(client=c2)
+    raised2 = False
+    try:
+        base2._save_row_locked(
+            "t", [("patient_id", "P0020")], {"entries": "[]"})
+    except RuntimeError as exc:
+        raised2 = True
+        msg = str(exc)
+        assert "补列失败" in msg
+        assert "P0020" not in msg, f"明文 patient_id 泄漏: {msg}"
+        assert "P002***" in msg, f"未脱敏: {msg}"
+    assert raised2, "补列写回不可见应抛 RuntimeError"
+    print("  [ok] 异常消息 pk 已脱敏（ConflictError + 补列失败均掩码，无明文泄漏）")
+
+
 def main():
-    print("BUG-69 回归（storage 条件写参数顺序 + OTSError 捕获）+ BUG-70（补列 UpdateRow）")
+    print("BUG-69/70/71/72/73 回归 + 外部审计 claim1/2/4/5 修复验证")
     test_bug69_condition_argument_order()
     test_bug69_otsserviceerror_conflict_retries()
     test_bug69_otsserviceerror_nonconflict_raises()
@@ -445,7 +540,11 @@ def main():
     test_bug71_backfill_rev_row_format_and_condition()
     test_bug72_backfill_rev_deadloop_guard()
     test_bug73_merge_row_invalid_new_json_rejected()
-    print("BUG69/70/71/72/73 OK（8 用例）")
+    test_claim1_cas_pass_if_missing_false()
+    test_claim2_merge_row_none_skipped()
+    test_claim4_condition_conflict_lowercase_space()
+    test_claim5_masked_pk_in_exceptions()
+    print("BUG69/70/71/72/73 + claim1/2/4/5 OK（12 用例）")
 
 
 if __name__ == "__main__":
