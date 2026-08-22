@@ -278,8 +278,17 @@ class TablestoreBase:
                        else RowExistenceExpectation.EXPECT_NOT_EXIST)
         col_cond = None
         if expect_exists and not force:
+            # BUG-69 修复（2026-08-22）：**参数顺序**此前写成
+            # `SingleColumnCondition(_REV_COL, ComparatorType.EQUAL, rev)`——SDK 6.4.8
+            # 签名为 (column_name, column_value, comparator)，错位后实际变成
+            # `column_value=ComparatorType.EQUAL(0)` + `comparator=rev`，条件语义变成
+            # "_rev 列 vs 值 0，比较符=rev"。rev 从 0 递增时逐档碰巧通过（0==0、
+            # 1!=0、2>0、3>=0），**rev=4 起比较符=LESS_THAN(4) → 条件 `_rev<0` 恒不成立
+            # → 第 5 次行更新必 ConditionCheckFail → OTSServiceError → NUTR_UNKNOWN**
+            # （用户实测：昨天写 4 次成功、今天第 5 次写失败）。正确传参为
+            # column_value=rev、comparator=ComparatorType.EQUAL。
             col_cond = SingleColumnCondition(
-                self._REV_COL, ComparatorType.EQUAL, rev)
+                self._REV_COL, rev, ComparatorType.EQUAL)
         condition = Condition(expectation, col_cond)
         clean = {k: v for k, v in attrs.items() if v is not None}
         row = Row(pk, list(clean.items()))
@@ -296,7 +305,7 @@ class TablestoreBase:
         OTSClientError（鉴权失败/参数非法/表不存在等 SDK 错误）一律当并发冲突重试
         3 次后报"存储并发写冲突"，把配置/环境错误误导成高并发问题。非冲突错误立即抛。
         """
-        from tablestore import OTSClientError
+        from tablestore import OTSError
 
         last_err: Exception | None = None
         # B1-2（2026-08-16，十审）：历史行补列不消耗重试预算——此前补列后
@@ -333,7 +342,14 @@ class TablestoreBase:
                 self._put_row_conditioned(
                     table, pk, next_attrs, rev, expect_exists=current is not None)
                 return
-            except OTSClientError as exc:
+            except OTSError as exc:
+                # BUG-69 修复（2026-08-22）：except 从 OTSClientError 扩为 SDK 异常
+                # 基类 OTSError——SDK 6.4.8 对**条件写失败（ConditionCheckFail）抛的是
+                # OTSServiceError 而非 OTSClientError**（protocol.handle_error 末尾
+                # `raise OTSServiceError(...)`）。此前只捕 OTSClientError：条件冲突
+                # （_rev 不匹配 / EXPECT_NOT_EXIST 已存在）→ OTSServiceError 直接冒泡
+                # → NUTR_UNKNOWN，**乐观锁重试分支从未真正生效**（前 4 次写入"碰巧"
+                # 条件通过掩盖了它）。修复后条件冲突正确进入重试。
                 # 审查（2026-08-19）：冲突判定收敛到公共函数 is_condition_conflict
                 # （care save_notification_expect_not_exist 共用，杜绝两处口径漂移）。
                 if not is_condition_conflict(exc):
