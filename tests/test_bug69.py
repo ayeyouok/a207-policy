@@ -13,6 +13,7 @@
 本测试用 Fake client 捕获条件对象断言参数语义；并验证 OTSServiceError 条件冲突
 进入重试、非冲突错误继续抛出。零 pytest 依赖（直接运行模式，CI 逐文件 python 跑）。
 """
+import json
 import os
 import sys
 
@@ -157,13 +158,77 @@ def test_bug69_is_condition_conflict_covers_both():
     print("  [ok] is_condition_conflict 双异常类型判定正确")
 
 
+def test_bug70_backfill_rev_preserves_business_columns():
+    """BUG-70：历史行（无 _rev 列）补列必须用 UpdateRow 增量写，业务列不得丢。
+
+    此前补列走 _put_row_conditioned（内部 SDK put_row = PutRow **整行覆盖写**）
+    只传 {_REV_COL: 0}——PutRow 删除该行所有未在请求中出现的属性列，历史行首次
+    更新即清空业务数据（entries/points 等）。修复后走 update_row（UpdateRow PUT
+    语义），仅添加 _rev 列，其他列保留。
+    """
+    from tablestore import OTSError  # noqa: F401  (仅确保 SDK 可用)
+
+    class _UpdateRowClient(_CaptureClient):
+        def __init__(self):
+            # 历史行：无 _rev 列，但有业务数据（2026-08-13 乐观锁上线前落库形态）
+            super().__init__(current_row={
+                "entries": json.dumps([{"meal": "早餐", "food": "小米粥",
+                                        "amount": "400g", "date": "2026-08-21"}],
+                                      ensure_ascii=False),
+                "total_points": 4,
+                "daily_points": 4,
+                "last_points_date": "2026-08-21",
+            })
+            self.update_calls = 0
+
+        def update_row(self, table, row, condition=None):
+            self.update_calls += 1
+            key = tuple(v for _, v in row.primary_key)
+            attrs = dict(self.current_row)
+            for col in row.attribute_columns:
+                # 三元组 (name, op, value)
+                attrs[col[0]] = col[2]
+            self.current_row = attrs
+
+        def put_row(self, table, row, condition):
+            self.put_calls += 1
+            # 补列后下一轮正常 CAS 写走 put_row 是合法路径（此时行已带 _rev）
+            key = tuple(v for _, v in row.primary_key)
+            attrs = dict(self.current_row)
+            for k, v in row.attribute_columns:
+                attrs[k] = v
+            self.current_row = attrs
+
+    client = _UpdateRowClient()
+    base = TablestoreBase(client=client)
+    base._save_row_locked(
+        "t", [("patient_id", "P0020")],
+        {"entries": json.dumps([{"meal": "早餐", "food": "小米粥",
+                                 "amount": "400g", "date": "2026-08-21"}],
+                               ensure_ascii=False),
+         "total_points": 5, "daily_points": 1, "last_points_date": "2026-08-22"})
+
+    assert client.update_calls >= 1, "历史行补列必须走 update_row"
+    row = client.current_row
+    assert "_rev" in row, "补列后行必须有 _rev"
+    assert row["_rev"] == 1, f"_rev 应为 1（0 补列 + 1 次 CAS 递增），实际 {row['_rev']}"
+    # 业务列必须保留（PutRow 覆盖写会丢光）
+    assert row["total_points"] == 5, f"total_points 丢失: {row}"
+    assert row["daily_points"] == 1, f"daily_points 丢失: {row}"
+    assert row["last_points_date"] == "2026-08-22", f"last_points_date 丢失: {row}"
+    entries = json.loads(row["entries"])
+    assert entries and entries[0]["food"] == "小米粥", f"entries 丢失: {row}"
+    print("  [ok] 历史行补列走 update_row，业务列全保留（total_points=5/_rev=1/entries 完好）")
+
+
 def main():
-    print("BUG-69 回归（storage 条件写参数顺序 + OTSError 捕获）")
+    print("BUG-69 回归（storage 条件写参数顺序 + OTSError 捕获）+ BUG-70（补列 UpdateRow）")
     test_bug69_condition_argument_order()
     test_bug69_otsserviceerror_conflict_retries()
     test_bug69_otsserviceerror_nonconflict_raises()
     test_bug69_is_condition_conflict_covers_both()
-    print("BUG69 OK（4 用例）")
+    test_bug70_backfill_rev_preserves_business_columns()
+    print("BUG69/70 OK（5 用例）")
 
 
 if __name__ == "__main__":

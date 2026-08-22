@@ -261,7 +261,10 @@ class TablestoreBase:
         """条件写：_rev 必须等于 rev（乐观锁）。条件不满足抛 OTSClientError。
 
         :param force: True 时跳过 _REV 列条件（仅保留行存在性期望）——S-4 用于
-          历史行（缺 _REV_COL）的无条件补列初始化。
+          历史行（缺 _REV_COL）的无条件补列初始化。BUG-70（2026-08-22）后补列
+          改走 _update_row_add_rev（UpdateRow 增量写），本参数保留但已无调用方
+          传 True（若未来恢复传 True，务必确认 attrs 含**全部**业务列——PutRow
+          是整行覆盖，缺列即删列）。
         """
         # 🔴 真实踩坑（2026-08-13）：此前 import SingleColumnValueCondition——该符号
         # 在 tablestore 6.x SDK **不存在**（正确类名 SingleColumnCondition），生产切
@@ -293,6 +296,32 @@ class TablestoreBase:
         clean = {k: v for k, v in attrs.items() if v is not None}
         row = Row(pk, list(clean.items()))
         self._get_client().put_row(table, row, condition)
+
+    def _update_row_add_rev(self, table: str,
+                            pk: list[tuple[str, str]]) -> None:
+        """增量补列：仅添加/覆盖 `_rev` 列（UpdateRow PUT 语义），**不影响其他属性列**。
+
+        BUG-70（2026-08-22）：此前补列走 `_put_row_conditioned`（内部 SDK `put_row`
+        = PutRow API，**整行覆盖写**）只传 `{_REV_COL: 0}`——Tablestore PutRow 会
+        删除该行所有未在请求中出现的属性列，历史行（2026-08-13 乐观锁上线前落库，
+        无 `_rev` 列）首次更新即清空业务数据。UpdateRow 只增写指定列，业务列保留。
+
+        :param table: 表名
+        :param pk: 主键（[(列名, 值), ...]）
+        """
+        from tablestore import (
+            Condition,
+            Row,
+            RowExistenceExpectation,
+            UpdateType,
+        )
+
+        # Row(pk, [(列名, UpdateType.PUT, 值), ...])——UpdateRow 的属性列三元组
+        row = Row(pk, [(self._REV_COL, UpdateType.PUT, 0)])
+        # 行存在性条件：目标行必须存在（历史行补列场景），缺行即失败不误建空行
+        condition = Condition(RowExistenceExpectation.EXPECT_EXIST)
+        # update_row 直接收 Row 对象（UpdateRowItem 是 BatchWriteRow 用的包装）
+        self._get_client().update_row(table, row, condition)
 
     def _save_row_locked(self, table: str, pk: list[tuple[str, str]],
                          attrs: dict[str, Any]) -> None:
@@ -332,9 +361,15 @@ class TablestoreBase:
                 # 只写 {_rev: 0} 幂等无害（业务列不动）；随后 continue 重新读取
                 # （行已带 _rev=0），走正常 CAS（_rev==0 条件写，合并并发修改）。
                 if self._REV_COL not in current:
-                    self._put_row_conditioned(
-                        table, pk, {self._REV_COL: 0}, rev=0,
-                        expect_exists=True, force=True)
+                    # BUG-70 修复（2026-08-22）：补列从 PutRow 改为 **UpdateRow 增量写**。
+                    # 此前走 _put_row_conditioned（内部 SDK put_row = PutRow API，**整行
+                    # 覆盖写**）只传 {_REV_COL: 0}——Tablestore PutRow 会删除该行所有
+                    # 未在请求中出现的属性列，仅保留 _rev=0，**业务数据（entries/points
+                    # 等）全部丢失**（注释"业务列不动"是误把 PutRow 当 UpdateRow）。
+                    # 触发条件：2026-08-13 乐观锁上线前落库的历史行（无 _REV_COL），
+                    # 首次更新即清空。改用 UpdateRow 增量添加 _rev 列（PUT 语义），
+                    # 其他属性列不受影响；行存在性条件仍保留（EXPECT_EXIST）。
+                    self._update_row_add_rev(table, pk)
                     continue
             next_attrs[self._REV_COL] = rev + 1
             attempts += 1  # 仅正常 CAS 尝试消耗预算（补列不占）
