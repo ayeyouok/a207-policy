@@ -462,7 +462,12 @@ def _matrix_writers(mcp: str) -> frozenset[str]:
 
 # --- M1 HIS ---
 HIS_FULL_VIEW: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})
-HIS_LIMITED: frozenset[str] = frozenset({"parent_assistant", "demo_parent_assistant"})
+# 2026-08-22：补 child_assistant（与矩阵 P1×child=ACCESS_LIMITED 对齐）。child 仅可经
+# P1_CHILD_READ_TOOLS 读 get_patient_profile（his._guard_access 工具级收口），视图性质属
+# "受限视图"，故归入 HIS_LIMITED（HIS_READ 随之包含）。注意：his.py 实际执行路径走
+# CHILD_ROLE 工具级判定，本集合仅作派生/文档一致性用途，不单独放行越权读工具。
+HIS_LIMITED: frozenset[str] = frozenset(
+    {"parent_assistant", "demo_parent_assistant", "child_assistant"})
 HIS_READ: frozenset[str] = HIS_FULL_VIEW | HIS_LIMITED
 HIS_BLOCKED: frozenset[str] = frozenset()        # 无被完全封锁的角色
 HIS_COHORT: frozenset[str] = frozenset({"doctor_assistant", "risk_warning"})

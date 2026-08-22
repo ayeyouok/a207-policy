@@ -44,13 +44,15 @@ def resolve_state_path(filename: str, *, base: str | None = None) -> Path:
         else:
             # 未设环境变量：落到系统临时目录，保证可写（避免只读安装目录崩溃）
             root = Path(tempfile.gettempdir()) / "a207_state"
-    # B2-1（2026-08-16，十审）：基准目录与包安装目录比对——此前仅 filename 防护，
-    # base/A207_DATA_DIR 从不与安装目录比对；一旦误配指向包目录（site-packages/
-    # src 下的 a207-policy 或其子目录），状态文件会写进安装目录（docstring 明确
-    # 要防的场景：只读/容器重启丢数据）。fail-closed：配置错误拒绝而非静默污染。
-    _installed = Path(__file__).resolve().parent.parent  # 包安装根（site-packages/a207-policy 或 src/a207-policy）
+    # B2-1（2026-08-16，十审）+ 2026-08-22 修正（off-by-one）：基准目录与**包目录本身**
+    # 比对——此前用 `parent.parent` 取到的是 `src`（包目录的**上一级**），会误把
+    # `src/data` 等合法工程子目录判成"安装目录"而误拒；同时又没精确钉住真正的包目录
+    # `a207_policy`。现改为比对 `__file__` 所在包目录（.../a207_policy），用 is_relative_to
+    # 仅拦截"包目录及其子目录"（写进包=污染+重启丢数据），而放行 `src` 下的合法工程
+    # 子目录（如 src/data、/tmp、A207_DATA_DIR 指向的任意非包路径）。
+    _installed = Path(__file__).resolve().parent  # a207_policy 包目录本身（非 src 父级）
     _root_resolved = root.resolve()
-    if _root_resolved == _installed or _installed in _root_resolved.parents:
+    if _root_resolved == _installed or _root_resolved.is_relative_to(_installed):
         raise ValueError(
             f"状态目录 {root} 指向包安装目录（{_installed}）——状态文件会写进"
             "安装目录（只读/重启丢数据），请改配 A207_DATA_DIR 到可写数据目录")

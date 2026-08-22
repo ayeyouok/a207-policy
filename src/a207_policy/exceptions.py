@@ -70,7 +70,12 @@ try:
     # 静默保留本地副本，语义与现状一致（全局包暴露的即本地副本类），但不产生噪音。
     # 完整初始化后 hasattr=True（如随包内置 _policy 副本在全局包已导入后加载），
     # 重定向保证「全局包 / 内置 _policy」两形态抛同一类对象。
-    if hasattr(_global_policy, "CallerError"):
+    # 2026-08-22（Claim 7 修复）：原子重定向——必须**全部** 4 个类在全局包都存在才整体
+    # 替换；否则（如旧版全局包缺 ConflictError）部分替换会留下"3 全局 + 1 本地"的分裂态
+    # （前 3 个已是全局类、ConflictError 仍是本地类 → 测试 except 按类身份匹配漏抓）。
+    # 改为 all(hasattr(...)) 校验齐备后才一次性整体替换。
+    if all(hasattr(_global_policy, name) for name in (
+            "CallerError", "CallerUnknown", "PermissionDenied", "ConflictError")):
         CallerError = _global_policy.CallerError
         CallerUnknown = _global_policy.CallerUnknown
         PermissionDenied = _global_policy.PermissionDenied

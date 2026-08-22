@@ -97,7 +97,12 @@ def get_child_patient_id() -> str:
         raise CallerUnknown(
             f"child_assistant 未绑定患儿：环境变量 {CHILD_PATIENT_ENV} 缺失或为空。"
             f"服务端必须由部署配置注入 child 绑定的患儿编号（P0-1：模型不可自证患儿）。")
-    return value
+    # 2026-08-22（Claim 6 修复）：患儿编号契约校验（与 gate.validate_patient_id 同款
+    # 正则 ^P[0-9]{4,}$，单一事实源）。部署误配畸形值（如 "P"/"abc"）会让下游工具钉死
+    # 到非法患儿范围，fail-closed：畸形即拒绝。延迟 import 避免与 gate 的循环依赖
+    # （gate 在模块顶层 `from .caller import get_caller`，此处运行时 gate 已完整加载）。
+    from .gate import validate_patient_id
+    return validate_patient_id(value)
 
 
 @contextmanager
