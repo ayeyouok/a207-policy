@@ -42,11 +42,9 @@ from .state import resolve_state_path
 _ALIASES = WRITE_TOOL_ALIASES  # 别名引用，保持 detect_write_tool 可读
 
 _NOTIFY_RE = re.compile(r"(?<![a-z0-9_])notify_[a-z_]+")
-_UNDERSCORE_PREFIXES = tuple(p for p in (
-    "write", "create", "update", "delete", "insert",
-    "upsert_", "notify_", "log_", "award_", "push_", "trigger_",
-    "close_", "schedule_", "save_",
-) if p.endswith("_"))
+# 2026-08-22（Claim 3 修复）：原 _UNDERSCORE_PREFIXES 用子串包含判定写动词，会把中名
+# 嵌 '_schedule_' 的只读工具（如 get_schedule_followup）误判为写（词边界假阳性）。
+# 已改为 is_write_action 内严格 startswith 前缀匹配（见下），此处不再保留该集合。
 
 # S6 修复（2026-08-13）：统一 patient_id 契约校验（单一事实源，与 P1 models 同款
 # 正则）。各 MCP 工具入口调用本函数，畸形 patient_id 不得进入存储/查询层——
@@ -114,14 +112,20 @@ def detect_write_tool(text: str) -> str | None:
 
 def is_write_action(action: str) -> bool:
     lowered = (action or "").strip().lower()
-    if any(lowered.startswith(prefix) for prefix in (
-        "write", "create", "update", "delete", "insert")):
+    # 2026-08-22（Claim 3 修复）：写动词严格**前缀**匹配——此前 `_UNDERSCORE_PREFIXES`
+    # 用 `("_"+prefix) in ("_"+lowered)` 子串包含判定，会把中名嵌 '_schedule_' 的只读工具
+    # （如 get_schedule_followup）误判为写动作（词边界假阳性，导致无写权只读角色被错误
+    # 拦截）。改严格 startswith：仅工具名**以写动词开头**才算写（get_/list_/query_ 等
+    # 只读前缀安全放行）；P-B4 的 dialog_analysis 误伤（含 log_ 子串）在严格前缀下同样
+    # 不再命中。优先查显式登记写工具（MX-3 字典），登记即写。
+    if detect_write_tool(lowered) is not None:
         return True
-    # P-B4 修复（2026-08-14）：下划线前缀须在**词边界**匹配——此前 `prefix in lowered`
-    # 子串命中，"log_" 会误命中 "dialog_analysis"（d-ia-LOG_-analysis 内含 log_）等
-    # 合法读工具名 → P1×parent 等 R 权限角色被误伤拒绝。加前导 "_" 构造词边界：
-    # 仅当前缀出现在开头或前一个字符是下划线时才算命中。
-    if any(("_" + prefix) in ("_" + lowered) for prefix in _UNDERSCORE_PREFIXES):
+    write_verbs = (
+        "write", "create", "update", "delete", "insert",
+        "upsert", "notify", "log", "award", "push", "trigger",
+        "close", "schedule", "save",
+    )
+    if any(lowered.startswith(v) for v in write_verbs):
         return True
     return any(hint in lowered for hint in ("写入", "写回", "新增一条", "保存到", "提交写"))
 
@@ -447,14 +451,27 @@ def verify_guardian_token(patient_id: str, guardian_token: str) -> bool:
       无条目/过期不比对（直接 False，无泄漏面）。
     - 无 expires_at 字段的旧令牌 → 向后兼容视为有效
     """
-    entry = _load_guardian_tokens().get(patient_id)
+    # 2026-08-22（Claim 4 修复）：入参契约规范化——与 issue_guardian_token 同走
+    # validate_patient_id（单一事实源）。issue 端已对 storage key 做 strip 规范化、
+    # _load_guardian_tokens 也再校验一次 key，故此处规范化后查表才能命中；带空白
+    # 字符的 id（如 "P0007 "）先前会静默 False 负。非法 id → 直接 False（不抛）。
+    try:
+        pid = validate_patient_id(patient_id)
+    except (ValueError, TypeError):
+        return False
+    entry = _load_guardian_tokens().get(pid)
     if not isinstance(entry, dict):
         # S4：缺条目直接 False——不得让空串令牌通过
         return False
     expires_at = entry.get("expires_at")
     if expires_at:
         try:
-            parsed = datetime.fromisoformat(str(expires_at))
+            raw_ts = str(expires_at).strip().replace("Z", "+00:00")
+            # 2026-08-22（Claim 1 修复）：Python 3.10 及更早 datetime.fromisoformat 不支持
+            # 末尾 'Z'（本包 requires-python >=3.10 真实可达），标准 UTC ISO（如 JS
+            # toISOString 的 "...Z"）会抛 ValueError 被 except 误判为过期 → 合法令牌失效。
+            # 解析前移植项目既有约定（repository.py 同款 .replace("Z","+00:00")）规范化。
+            parsed = datetime.fromisoformat(raw_ts)
             # P1-8 修复（2026-08-13）：naive 时间戳（无时区，如 his.py 早期签发）与
             # timezone.utc aware 比较会抛 TypeError（此前只捕 ValueError → 家长读路径
             # 500）。naive 统一按 UTC 解释（签发方 his.py 用 timezone.utc 写入；历史

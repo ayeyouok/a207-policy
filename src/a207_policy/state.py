@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -84,13 +85,27 @@ def atomic_write_json(path, data, *, encoding: str = "utf-8") -> None:
         # 修复：目标已存在则继承其原权限，新建则按标准 0644（与 umask 协同），避免
         # 共享卷读被锁死。
         if target.exists():
+            # 2026-08-22（Claim 2A 修复）：st_mode 含文件类型位（S_IFREG 等），os.chmod
+            # 只认权限位；OverlayFS/部分网络卷传完整 st_mode 会触发 EINVAL 致权限继承
+            # 静默失败。用 stat.S_IMODE 过滤为纯权限位（0o7777）。
             try:
-                os.chmod(tmp_name, target.stat().st_mode)
+                os.chmod(tmp_name, stat.S_IMODE(target.stat().st_mode))
             except OSError:
                 pass
         else:
+            # 2026-08-22（Claim 2B 修复）：新建文件尊重宿主机 umask 安全基线（umask
+            # 027/077 时不应暴力开 others 读）。标准 umask 022 → 0o666&~022 = 0o644，
+            # 与跨容器共享卷可读需求一致；更严 umask 收紧为运维显式安全选择。
+            # Windows 无 os.umask（NotImplemented/AttributeError）→ 退化为 0o644。
+            mode = 0o644
             try:
-                os.chmod(tmp_name, 0o644)
+                um = os.umask(0)
+                os.umask(um)
+                mode = 0o666 & ~um
+            except (OSError, AttributeError, NotImplementedError):
+                pass
+            try:
+                os.chmod(tmp_name, mode)
             except OSError:
                 pass
         os.replace(tmp_name, target)

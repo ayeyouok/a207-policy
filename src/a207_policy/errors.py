@@ -41,6 +41,25 @@ DOMAIN_CONFIG: dict[str, dict[str, str]] = {
 _DATA_ERROR_TYPES = (FileNotFoundError, OSError, json.JSONDecodeError, RuntimeError)
 
 
+def _as_tuple(val: Any) -> tuple[type, ...]:
+    """把异常类型传参规整为元组：None→()，单类型→(t,)，元组→原样，可迭代→tuple。
+
+    2026-08-22（Claim 6 修复）：translate_error 入口若收到单个异常类
+    （extra_data_types=MyDataError 而非 (MyDataError,)），`_DATA_ERROR_TYPES +
+    extra_data_types` 会抛 TypeError 且发生在函数内部、无法收敛为信封 → 异常中间件
+    自身 500 崩溃。规整后再做元组加法。
+    """
+    if val is None:
+        return ()
+    if isinstance(val, tuple):
+        return val
+    if isinstance(val, type):
+        return (val,)
+    if hasattr(val, "__iter__"):
+        return tuple(val)
+    return ()
+
+
 def translate_error(
     exc: Exception,
     *,
@@ -78,10 +97,10 @@ def translate_error(
         # 现显式映射：detail 保留（业务冲突信息对调用方有明确语义，非内部路径泄漏）。
         logger.info("[%s]业务写冲突:%s%s exc=%s", domain, ctx, args_ctx, exc)
         return {"ok": False, "error": "CONFLICT", "detail": str(exc)}
-    if isinstance(exc, extra_invalid_types):
+    if isinstance(exc, _as_tuple(extra_invalid_types)):
         logger.info("[%s]入参错误（客户端）:%s%s exc=%s", domain, ctx, args_ctx, exc)
         return {"ok": False, "error": "INVALID_INPUT", "detail": str(exc)}
-    if isinstance(exc, _DATA_ERROR_TYPES + extra_data_types):
+    if isinstance(exc, _DATA_ERROR_TYPES + _as_tuple(extra_data_types)):
         logger.warning("[%s]内部数据错误:%s%s exc=%s", domain, ctx, args_ctx, exc)
         return {"ok": False, "error": "INTERNAL_ERROR",
                 "detail": f"内部数据错误（error_code={cfg['data_code']}），详情见服务端日志"}
