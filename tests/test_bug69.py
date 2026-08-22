@@ -12,6 +12,10 @@
 
 本测试用 Fake client 捕获条件对象断言参数语义；并验证 OTSServiceError 条件冲突
 进入重试、非冲突错误继续抛出。零 pytest 依赖（直接运行模式，CI 逐文件 python 跑）。
+
+CI 兼容（2026-08-22）：a207-policy 的 publish.yml 只跑 `python tests/test_*.py`、
+**不安装任何依赖**（pyproject 无 tablestore）——SDK 缺失时用本地 Fake 等价类回退
+（与 clinical-data tests/harness.py 同模式），测试在无 SDK 的 CI 环境同样可跑。
 """
 import json
 import os
@@ -25,6 +29,46 @@ from a207_policy.storage import (  # noqa: E402
     TablestoreBase,
     is_condition_conflict,
 )
+
+# ---- SDK 可选导入（CI 无 tablestore 时回退本地等价类）----
+try:
+    from tablestore import (  # noqa: F401
+        ComparatorType,
+        OTSClientError,
+        OTSError,
+        OTSServiceError,
+        SingleColumnCondition,
+    )
+except ImportError:  # pragma: no cover - 仅无 SDK 的 CI 环境
+    class OTSError(Exception):  # noqa: E999
+        pass
+
+    class OTSClientError(OTSError):
+        pass
+
+    class OTSServiceError(OTSError):
+        def __init__(self, status, code, message, request_id):
+            super().__init__(message)
+            self.status = status
+            self.code = code
+            self.message = message
+
+    class ComparatorType:  # 与 SDK 枚举值一致（EQUAL=0...LESS_EQUAL=5）
+        EQUAL = 0
+        NOT_EQUAL = 1
+        GREATER_THAN = 2
+        GREATER_EQUAL = 3
+        LESS_THAN = 4
+        LESS_EQUAL = 5
+
+    class SingleColumnCondition:
+        def __init__(self, column_name, column_value, comparator,
+                     pass_if_missing=True, latest_version_only=True):
+            self.column_name = column_name
+            self.column_value = column_value
+            self.comparator = comparator
+            self.pass_if_missing = pass_if_missing
+            self.latest_version_only = latest_version_only
 
 
 class _FakeRow:
@@ -78,8 +122,6 @@ def test_bug69_condition_argument_order():
     错位前：column_value=EQUAL(=0) + comparator=rev → rev=4 时 `_rev<0` 恒失败。
     修复后：column_value=rev + comparator=EQUAL → 语义为 `_rev == rev`。
     """
-    from tablestore import ComparatorType, SingleColumnCondition
-
     client = _CaptureClient(current_row={"_rev": 4, "entries": "[]"})
     _call_put_row_conditioned(client, rev=4, expect_exists=True)
 
@@ -101,8 +143,6 @@ def test_bug69_otsserviceerror_conflict_retries():
     OTSClientError → 冲突直接冒泡（用户实测 NUTR_UNKNOWN）。修复后 except OTSError
     → 条件冲突走 is_condition_conflict=True → 重试。本测试：第一次冲突、第二次成功。
     """
-    from tablestore import OTSServiceError
-
     class _OnceFailClient(_CaptureClient):
         def put_row(self, table, row, condition):
             self.put_calls += 1
@@ -125,8 +165,6 @@ def test_bug69_otsserviceerror_conflict_retries():
 
 def test_bug69_otsserviceerror_nonconflict_raises():
     """非条件冲突 OTSServiceError（如鉴权/表不存在）必须继续抛，不得当冲突重试。"""
-    from tablestore import OTSServiceError
-
     class _AuthFailClient(_CaptureClient):
         def put_row(self, table, row, condition):
             self.put_calls += 1
@@ -146,8 +184,6 @@ def test_bug69_otsserviceerror_nonconflict_raises():
 
 def test_bug69_is_condition_conflict_covers_both():
     """is_condition_conflict 对 OTSClientError 与 OTSServiceError 都能判定。"""
-    from tablestore import OTSClientError, OTSServiceError
-
     assert is_condition_conflict(OTSServiceError(
         400, "OTSConditionCheckFail", "not match", "r")) is True
     # OTSClientError 无 code 属性，仅 message 命中 "not match" 才判冲突
@@ -166,8 +202,6 @@ def test_bug70_backfill_rev_preserves_business_columns():
     更新即清空业务数据（entries/points 等）。修复后走 update_row（UpdateRow PUT
     语义），仅添加 _rev 列，其他列保留。
     """
-    from tablestore import OTSError  # noqa: F401  (仅确保 SDK 可用)
-
     class _UpdateRowClient(_CaptureClient):
         def __init__(self):
             # 历史行：无 _rev 列，但有业务数据（2026-08-13 乐观锁上线前落库形态）
