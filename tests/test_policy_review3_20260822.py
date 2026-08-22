@@ -18,12 +18,25 @@
 Claim 5（caller.get_child_patient_id 惰性导入）裁定为「非缺陷·驳回」，无需新增测试。
 """
 
-import logging
+from __future__ import annotations
+
 import os
+
+os.environ.setdefault("A207_ENV", "test")            # N-SEC-1：测试进程显式声明测试环境
+os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏：确认 json 后端为开发模式
 import json
+import logging
 import shutil
-import tempfile
 import stat
+import sys
+import tempfile
+from pathlib import Path
+
+sys.stdout.reconfigure(encoding="utf-8")
+# CI（publish.yml 仅 `python tests/test_*.py`、不安装包本身）必须显式把仓库 src 加入
+# sys.path，否则 `from a207_policy import ...` 抛 ModuleNotFoundError
+# （2026-08-22 CI 踩坑；对齐 test_policy.py / test_policy_review2 的引导模式）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from a207_policy import (
     verify_guardian_token,
