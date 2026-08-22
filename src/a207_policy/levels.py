@@ -18,14 +18,25 @@ RISK_LEVEL_RANK: dict[str, int] = {"L1": 3, "L2": 2, "L3": 1, "none": 0}
 _VALID_LEVELS = frozenset(RISK_LEVEL_RANK.keys())
 
 
+def _normalize_level(level: object) -> str:
+    """归一风险等级键：None/空串/大小写差异统一到 RISK_LEVEL_RANK 的键空间。
+
+    初始无状态用 "none"（RANK=0）；上游传 None/"" 一律规整为 "none"，
+    避免初次升级（none→L1/L2/L3）因 .get(None) 返回 None 而误抛 ValueError。
+    """
+    key = (str(level) if level is not None else "none").strip().upper()
+    return "none" if key in ("", "NONE") else key
+
+
 def is_valid_escalation(from_level: str, to_level: str) -> bool:
     """risk_escalation 事件语义校验：to_level 必须比 from_level 更严重（L1>L2>L3）。
 
     返回 True=合法升级；False=降级/持平（非法）。非法等级串抛 ValueError
-    （fail-closed：不静默把未知等级当最低档）。
+    （fail-closed：不静默把未知等级当最低档）。None/""/大小写自动规整到
+    "none"（初始无状态），使首次升级（none→L1/L2/L3）正常流转。
     """
-    a = RISK_LEVEL_RANK.get(from_level)
-    b = RISK_LEVEL_RANK.get(to_level)
+    a = RISK_LEVEL_RANK.get(_normalize_level(from_level))
+    b = RISK_LEVEL_RANK.get(_normalize_level(to_level))
     if a is None or b is None:
         raise ValueError(f"非法风险等级: from={from_level!r} to={to_level!r}")
     return b > a

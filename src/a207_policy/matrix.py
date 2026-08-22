@@ -505,8 +505,10 @@ FOLLOWUP_CLINICIAN: frozenset[str] = frozenset({"doctor_assistant", "risk_warnin
 # 矩阵 nutrition×parent=R/W、×doctor=R/W（2026-08-12 需求对齐：临床可代录日记）
 # ⇒ 这里自然得出 {parent_assistant, doctor_assistant}。
 NUTRITION_ASSESSMENT_WRITE_ALLOWED: frozenset[str] = _matrix_writers("CKDNutri-nutrition-mcp")
+# 数据面·读工具集合（仅只读）：upsert_food_diary 是写工具，走 gate.enforce_nutrition_tool
+# 专用写分支（line 292 先行拦截），**不在此集合**——此前误混入写工具会造成"数据读工具
+# 列表"语义失真（外部若依赖本集合枚举读工具会拿到写工具，且分支顺序变动会误报错误文案）。
 NUTRITION_ASSESSMENT_DATA_TOOLS: frozenset[str] = frozenset({
-    "upsert_food_diary",
     "get_food_diary_summary",
 })
 NUTRITION_ASSESSMENT_DATA_ROLES: frozenset[str] = frozenset({

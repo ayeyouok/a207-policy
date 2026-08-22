@@ -77,6 +77,22 @@ def atomic_write_json(path, data, *, encoding: str = "utf-8") -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
+        # S-20260822：tempfile.mkstemp 在 POSIX 创建 0600 临时文件，os.replace 后目标
+        # 文件权限被锁为 0600（仅属主可读写）。多容器部署（魔搭各 MCP 独立容器、共享
+        # A207_DATA_DIR 卷）下，guardian_tokens.json / food_diary 等状态文件会被其他 UID
+        # 的容器读权限拒绝（跨容器读共享状态失败，典型的如 P2 读 P1 签发的 guardian token）。
+        # 修复：目标已存在则继承其原权限，新建则按标准 0644（与 umask 协同），避免
+        # 共享卷读被锁死。
+        if target.exists():
+            try:
+                os.chmod(tmp_name, target.stat().st_mode)
+            except OSError:
+                pass
+        else:
+            try:
+                os.chmod(tmp_name, 0o644)
+            except OSError:
+                pass
         os.replace(tmp_name, target)
     except BaseException:
         try:

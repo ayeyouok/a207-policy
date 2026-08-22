@@ -366,7 +366,13 @@ def _enforce(mcp_name: str, action: str) -> str:
                 caller, mcp, action,
                 f"写工具 {wt} 未登记 WRITE_TOOL_POLICY（fail-closed）："
                 f"新增写工具必须显式登记后再放行（P1-1）")
-        elif mcp != policy["mcp"] or caller not in policy["allowed"]:
+        elif mcp != policy["mcp"]:
+            # 路由错误：工具不属于请求方 MCP——与"caller 无权"区分，便于日志快速定位。
+            raise PermissionDenied(
+                caller, mcp, action,
+                f"写工具 {wt} 属于 {policy['mcp']}，与请求 mcp={mcp} 不一致"
+                f"（路由错误：请在正确的 MCP 上调用该工具）")
+        elif caller not in policy["allowed"]:
             raise PermissionDenied(caller, mcp, action, f"MX-3 写权受限: {wt}")
         else:
             # OD-011：登记写工具额外回查矩阵 R/W（OD-010 待决豁免除外），确保矩阵为唯一事实源。
