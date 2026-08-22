@@ -184,23 +184,29 @@ def _merge_row(current: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(
                     f"字段 {key} 新值类型错误（期望 JSON 数组，实际 "
                     f"{type(new_list).__name__}）：拒绝覆盖，请检查业务层序列化")
-            # 旧值校验（care BUG-4，保留）
-            if isinstance(cur_value, str):
-                try:
-                    cur_list = json.loads(cur_value)
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError(
-                        f"字段 {key} 存储值损坏（非法 JSON）：拒绝覆盖，"
-                        "请人工修复 Tablestore 该行数据") from exc
-                if not isinstance(cur_list, list):
-                    raise RuntimeError(
-                        f"字段 {key} 存储值类型错误（期望 JSON 数组，实际 "
-                        f"{type(cur_list).__name__}）：拒绝覆盖，请人工修复存储行")
-                merged[key] = json.dumps(
-                    _merge_lists(cur_list, new_list), ensure_ascii=False)
+            # 旧值校验（care BUG-4 + 外部审计 claim2，fail-closed 双向）：
+            # cur_value is None（首次写该字段）→ 直接用已校验的新值；
+            # cur_value 非 str（早期历史遗留 int/bool/bytes 等脏数据）→ 拒绝覆盖；
+            # cur_value 是 str → 解析并校验为 JSON 数组后合并。
+            if cur_value is None:
+                merged[key] = value
                 continue
-            # cur 缺失/非 str（历史首次写该字段）→ 直接用已校验的新值
-            merged[key] = value
+            if not isinstance(cur_value, str):
+                raise RuntimeError(
+                    f"字段 {key} 存储值类型错误（期望 JSON 数组字符串，实际 "
+                    f"{type(cur_value).__name__}）：拒绝覆盖，请人工修复存储行")
+            try:
+                cur_list = json.loads(cur_value)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"字段 {key} 存储值损坏（非法 JSON）：拒绝覆盖，"
+                    "请人工修复 Tablestore 该行数据") from exc
+            if not isinstance(cur_list, list):
+                raise RuntimeError(
+                    f"字段 {key} 存储值类型错误（期望 JSON 数组，实际 "
+                    f"{type(cur_list).__name__}）：拒绝覆盖，请人工修复存储行")
+            merged[key] = json.dumps(
+                _merge_lists(cur_list, new_list), ensure_ascii=False)
             continue
         # 非注册字段：两端都是 JSON 数组字符串才按 id 去重合并，否则普通覆盖
         if isinstance(cur_value, str) and isinstance(value, str):
@@ -412,9 +418,16 @@ class TablestoreBase:
         init_attempts = 0
         while attempts < self._MAX_RETRY:
             current = self._get_row(table, pk)
-            rev = int(current.get(self._REV_COL, 0)) if current else 0
+            # 审查（2026-08-22 深夜，外部审计 claim1）：`current` 语义判定必须用
+            # `is not None` 而非 truthy——`_get_row` 在行存在但**属性列为空**时返回
+            # `{}`（仅行不存在才返回 None）。`bool({}) is False` 会让既有空属性行被
+            # 误判为"无行"：跳过 _merge_row 更跳过 `if _REV_COL not in current:` 的
+            # 补列逻辑 → 随后走 `_rev==0` CAS（pass_if_missing=False）因行无 _rev 列
+            # 恒 ConditionCheckFail → 3 次重试全败误报 ConflictError（无法写入）。修正为
+            # `is not None`：空属性行正常进入补列分支（补 _rev 列）后 CAS 写成功。
+            rev = int(current.get(self._REV_COL, 0)) if current is not None else 0
             next_attrs = dict(attrs)
-            if current:
+            if current is not None:
                 next_attrs = _merge_row(current, next_attrs)  # S5：合并并发修改
                 # S-4（2026-08-15）：**历史行无 _REV_COL**（2026-08-13 乐观锁上线前
                 # 落库）——条件 `_REV_COL == 0` 对缺列恒不满足（列不存在 ≠ 等于 0），

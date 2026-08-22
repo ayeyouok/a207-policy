@@ -530,8 +530,74 @@ def test_claim5_masked_pk_in_exceptions():
     print("  [ok] 异常消息 pk 已脱敏（ConflictError + 补列失败均掩码，无明文泄漏）")
 
 
+def test_claim1_empty_attribute_row_writable():
+    """外部审计 claim1：既有行但属性列为空（current={}）必须可正常写入。
+
+    旧实现 `_save_row_locked` 用 `if current:` 判定——空字典 `{}` truthy 为 False，
+    跳过 _merge_row 更跳过 `if _REV_COL not in current:` 补列分支 → 行无 _rev 列却走
+    `_rev==0` CAS（pass_if_missing=False）→ ConditionCheckFail → 3 次重试全败误报
+    ConflictError（无法写入）。修复后 `if current is not None:` 对空字典判 True，
+    正常补列 _rev 后 CAS 写成功。
+    """
+    class _EmptyRowClient(_CaptureClient):
+        def update_row(self, table, row, condition=None):
+            # 补列成功：把 _rev=0 写回（模拟服务端 UpdateRow 生效），后续 CAS 可读到 _rev
+            ac = row.attribute_columns
+            if isinstance(ac, dict):
+                for op_cols in ac.values():
+                    for col in op_cols:
+                        self.current_row[col[0]] = col[1]
+            else:
+                for col in ac:
+                    self.current_row[col[0]] = col[2]
+
+    # 既有行但属性列为空（current_row={} → _get_row 返回 {}，非 None）
+    client = _EmptyRowClient(current_row={})
+    base = TablestoreBase(client=client)
+    base._save_row_locked(
+        "t", [("patient_id", "P0020")],
+        {"entries": "[]", "total_points": 5})
+    row = client.current_row
+    assert "_rev" in row, "空属性行必须补列 _rev"
+    assert row["_rev"] == 1, f"空属性行 CAS 后 _rev 应为 1，实际 {row.get('_rev')}"
+    assert row["total_points"] == 5, f"业务列丢失: {row}"
+    print("  [ok] 既有空属性行可正常补列+CAS 写入（无死锁误报冲突）")
+
+
+def test_claim2_merge_row_dirty_nonstr_old_rejected():
+    """外部审计 claim2：注册 JSON list 字段，旧值为非 str 脏数据（int/bool/bytes）
+    必须 fail-closed 拒绝合并，不得静默用新值覆盖损坏数据；仅 cur_value is None
+    （首次写该字段）才允许直接赋新值。"""
+    from a207_policy import storage as _storage_mod
+
+    _storage_mod._JSON_LIST_FIELDS.add("records")
+    try:
+        # 旧值 int（非 str 脏数据）→ 必须拒绝
+        try:
+            _merge_row({"records": 123}, {"records": '[{"id":"r2"}]'})
+            raise AssertionError("旧值 int 应被拒绝覆盖")
+        except RuntimeError:
+            pass
+        # 旧值 bool（非 str 脏数据）→ 必须拒绝
+        try:
+            _merge_row({"records": True}, {"records": '[{"id":"r2"}]'})
+            raise AssertionError("旧值 bool 应被拒绝覆盖")
+        except RuntimeError:
+            pass
+        # 首次写（cur_value is None）→ 允许直接用新值
+        out = _merge_row({}, {"records": '[{"id":"r2"}]'})
+        assert out["records"] == '[{"id":"r2"}]', out
+        # 合法 str 旧值仍正常合并（不回归）
+        out2 = _merge_row({"records": '[{"id":"r1"}]'},
+                          {"records": '[{"id":"r2"}]'})
+        assert '"r1"' in out2["records"] and '"r2"' in out2["records"], out2
+    finally:
+        _storage_mod._JSON_LIST_FIELDS.discard("records")
+    print("  [ok] 旧值非 str 脏数据拒绝覆盖（fail-closed）；首次写/合法合并不回归")
+
+
 def main():
-    print("BUG-69/70/71/72/73 回归 + 外部审计 claim1/2/4/5 修复验证")
+    print("BUG-69/70/71/72/73 回归 + 外部审计 claim1/2/4/5 + claim1/2(续) 修复验证")
     test_bug69_condition_argument_order()
     test_bug69_otsserviceerror_conflict_retries()
     test_bug69_otsserviceerror_nonconflict_raises()
@@ -544,7 +610,9 @@ def main():
     test_claim2_merge_row_none_skipped()
     test_claim4_condition_conflict_lowercase_space()
     test_claim5_masked_pk_in_exceptions()
-    print("BUG69/70/71/72/73 + claim1/2/4/5 OK（12 用例）")
+    test_claim1_empty_attribute_row_writable()
+    test_claim2_merge_row_dirty_nonstr_old_rejected()
+    print("BUG69/70/71/72/73 + claim1/2/4/5 + claim1/2(续) OK（14 用例）")
 
 
 if __name__ == "__main__":
